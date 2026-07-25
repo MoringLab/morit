@@ -249,6 +249,7 @@ class DownloadEntry {
     this.saveLocation,
     this.fileName,
     this.mimeType,
+    this.sizeBytes,
     this.description,
     this.error,
     this.wifiOnly = false,
@@ -275,6 +276,7 @@ class DownloadEntry {
   String? saveLocation;
   String? fileName;
   String? mimeType;
+  int? sizeBytes;
   String? description;
   String? error;
   bool wifiOnly;
@@ -306,6 +308,7 @@ class DownloadEntry {
     saveLocation: remote ? null : json['save_location'] as String?,
     fileName: remote ? null : json['file_name'] as String?,
     mimeType: remote ? null : json['mime_type'] as String?,
+    sizeBytes: remote ? null : (json['size_bytes'] as num?)?.toInt(),
     description: remote ? null : json['description'] as String?,
     error: json['error'] as String?,
     wifiOnly: remote ? false : json['wifi_only'] as bool? ?? false,
@@ -350,6 +353,7 @@ class DownloadEntry {
     'save_location': saveLocation,
     'file_name': fileName,
     'mime_type': mimeType,
+    'size_bytes': sizeBytes,
     'description': description,
     'wifi_only': wifiOnly,
     'device_owned': deviceOwned,

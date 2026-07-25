@@ -8,6 +8,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -42,6 +43,7 @@ private const val DOWNLOAD_MIME_SUFFIX = ".mime"
 private const val DOWNLOAD_NAME_SUFFIX = ".name"
 private const val DOWNLOAD_KIND_SUFFIX = ".kind"
 private const val DOWNLOAD_EXPECTED_LENGTH_SUFFIX = ".expected_length"
+private const val DOWNLOAD_COMPLETE_CHANNEL_ID = "download_complete"
 
 internal fun mediaSignatureError(
     bytes: ByteArray,
@@ -188,7 +190,7 @@ internal fun enqueuePublicDownload(
     val directory = publicDownloadDirectory(mimeType, fileName, value.mediaKind)
     val request = DownloadManager.Request(uri)
         .setTitle(value.title?.trim()?.takeIf(String::isNotBlank)?.take(200) ?: fileName)
-        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
         .setDestinationInExternalPublicDir(
             directory,
             "$DOWNLOAD_SUBDIRECTORY/$fileName",
@@ -310,15 +312,93 @@ class DownloadCompleteReceiver : BroadcastReceiver() {
             val localUri = cursor.getString(
                 cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI),
             ) ?: return
-            val path = Uri.parse(localUri).takeIf { it.scheme == "file" }?.path ?: return
-            MediaScannerConnection.scanFile(
-                context,
-                arrayOf(path),
-                arrayOf(manager.getMimeTypeForDownloadedFile(id) ?: "*/*"),
-                null,
-            )
+            Uri.parse(localUri).takeIf { it.scheme == "file" }?.path?.let { path ->
+                MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(path),
+                    arrayOf(manager.getMimeTypeForDownloadedFile(id) ?: "*/*"),
+                    null,
+                )
+            }
+            postDownloadCompleteNotification(context, manager, id)
         }
     }
+}
+
+private fun postDownloadCompleteNotification(
+    context: Context,
+    manager: DownloadManager,
+    id: Long,
+) {
+    val notificationManager = context.getSystemService(NotificationManager::class.java)
+    if (!notificationManager.areNotificationsEnabled()) return
+    val uri = manager.getUriForDownloadedFile(id) ?: return
+    val mimeType = manager.getMimeTypeForDownloadedFile(id) ?: "*/*"
+    val preferences = context.getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE)
+    val fileName = preferences.getString("$id$DOWNLOAD_NAME_SUFFIX", null) ?: "다운로드 파일"
+    val directory = preferences.getString(id.toString(), Environment.DIRECTORY_DOWNLOADS)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                DOWNLOAD_COMPLETE_CHANNEL_ID,
+                "다운로드 완료",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "완료된 파일 열기, 위치 보기, 공유"
+                lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+            },
+        )
+    }
+    fun activity(requestCode: Int, intent: Intent): PendingIntent =
+        PendingIntent.getActivity(
+            context,
+            requestCode,
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+    val requestCode = (id xor (id ushr 32)).toInt() and 0x3fffffff
+    val open = activity(
+        requestCode,
+        Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, mimeType)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+    )
+    val share = activity(
+        requestCode xor 0x10000000,
+        Intent.createChooser(
+            Intent(Intent.ACTION_SEND).apply {
+                type = mimeType
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newUri(context.contentResolver, fileName, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            },
+            "파일 공유",
+        ),
+    )
+    val folder = activity(
+        requestCode xor 0x20000000,
+        Intent(DownloadManager.ACTION_VIEW_DOWNLOADS),
+    )
+    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        Notification.Builder(context, DOWNLOAD_COMPLETE_CHANNEL_ID)
+    } else {
+        Notification.Builder(context)
+    }
+    notificationManager.notify(
+        requestCode xor 0x3D0A0000,
+        builder
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setContentTitle("다운로드 완료")
+            .setContentText("$fileName · $directory/$DOWNLOAD_SUBDIRECTORY")
+            .setContentIntent(open)
+            .addAction(android.R.drawable.ic_menu_view, "열기", open)
+            .addAction(android.R.drawable.ic_menu_agenda, "폴더", folder)
+            .addAction(android.R.drawable.ic_menu_share, "공유", share)
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_STATUS)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .build(),
+    )
 }
 
 open class NativeFlutterActivity : FlutterActivity() {

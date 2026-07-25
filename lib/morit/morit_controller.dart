@@ -2642,6 +2642,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       quality: candidate.qualityLabel ?? 'original',
       fileName: candidate.fileName,
       mimeType: candidate.mimeType,
+      sizeBytes: candidate.sizeBytes,
       description: description.trim(),
       backendAssetId: candidate.assetId,
       createdAt: now,
@@ -2710,7 +2711,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       ..error = null
       ..updatedAt = DateTime.now().toUtc()
       ..dirty = true;
-    await _changed();
+    await _changed(syncTodayNotification: false);
     try {
       final job = await _downloadBackend.createJob(
         candidate,
@@ -2727,7 +2728,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       entry
         ..backendJobId = job.id
         ..backendStage = job.stage
-        ..backendEngine = job.engine;
+        ..backendEngine = job.engine
+        ..sizeBytes = job.contentLength ?? entry.sizeBytes;
       if (job.ready) {
         await _startReadyBackendFile(entry, job, attempt: attempt);
         return;
@@ -2801,7 +2803,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     entry
       ..updatedAt = DateTime.now().toUtc()
       ..dirty = true;
-    await _changed();
+    await _changed(syncTodayNotification: false);
     final jobId = entry.backendJobId;
     if (jobId != null &&
         !entry.nativeBackendTransferOwned &&
@@ -2834,9 +2836,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         ..error = '서버가 완료 파일의 주소·이름·형식을 모두 반환하지 않았습니다.'
         ..updatedAt = DateTime.now().toUtc()
         ..dirty = true;
-      await _changed();
+      await _changed(syncTodayNotification: false);
       return;
     }
+    entry.sizeBytes = job.contentLength ?? entry.sizeBytes;
     await _startNativeDownload(
       entry,
       MediaCandidate(
@@ -2889,7 +2892,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       ..updatedAt = DateTime.now().toUtc()
       ..dirty = true;
     _downloadAttempts.remove(entryId);
-    await _changed();
+    await _changed(syncTodayNotification: false);
   }
 
   Future<void> _startNativeDownload(
@@ -2911,7 +2914,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       entry.error = '다운로드 주소가 올바르지 않습니다.';
       entry.updatedAt = DateTime.now().toUtc();
       entry.dirty = true;
-      await _changed();
+      await _changed(syncTodayNotification: false);
       return;
     }
     final previousNativeId = entry.nativeId;
@@ -2923,7 +2926,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         entry.error = '기존 다운로드 작업을 정리하지 못해 다시 시작하지 않았습니다.';
         entry.updatedAt = DateTime.now().toUtc();
         entry.dirty = true;
-        await _changed();
+        await _changed(syncTodayNotification: false);
         return;
       }
     }
@@ -2938,7 +2941,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       entry.error = failure.message;
       entry.updatedAt = DateTime.now().toUtc();
       entry.dirty = true;
-      await _changed();
+      await _changed(syncTodayNotification: false);
       return;
     }
     final resolvedCandidate = checked.candidate!;
@@ -3005,7 +3008,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
     entry.updatedAt = DateTime.now().toUtc();
     entry.dirty = true;
-    await _changed();
+    await _changed(syncTodayNotification: false);
   }
 
   Future<void> _restartDownload(DownloadEntry entry) async {
@@ -3018,7 +3021,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       entry.error = '원본 링크가 올바르지 않아 다시 분석할 수 없습니다.';
       entry.updatedAt = DateTime.now().toUtc();
       entry.dirty = true;
-      await _changed();
+      await _changed(syncTodayNotification: false);
       return;
     }
     final analysis = await analyzeMediaUrl(source);
@@ -3040,7 +3043,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       entry.error = '원본 링크에서 다운로드 파일을 다시 찾지 못했습니다.';
       entry.updatedAt = DateTime.now().toUtc();
       entry.dirty = true;
-      await _changed();
+      await _changed(syncTodayNotification: false);
       return;
     }
     await _startDownload(entry, candidate);
@@ -3338,6 +3341,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
                   '시스템 다운로드가 2분 동안 시작되지 않아 중단했습니다. 네트워크를 확인한 뒤 재시도해 주세요.';
             } else {
               if (total > 0) {
+                entry.sizeBytes = total;
                 final deviceProgress = (downloaded * 100 ~/ total).clamp(
                   0,
                   100,
@@ -3474,7 +3478,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         ..error = '기기 다운로드는 중단했지만 서버 작업 취소를 확인하지 못했습니다.'
         ..updatedAt = DateTime.now().toUtc()
         ..dirty = true;
-      await _changed();
+      await _changed(syncTodayNotification: false);
       return;
     }
     entry.nativeId = null;
@@ -3485,7 +3489,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     entry.error = null;
     entry.updatedAt = DateTime.now().toUtc();
     entry.dirty = true;
-    await _changed();
+    await _changed(syncTodayNotification: false);
   }
 
   Future<void> pauseDownload(DownloadEntry entry) async {
@@ -3530,7 +3534,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
           ..error = '기기 다운로드는 중단했지만 서버 작업 일시 중지를 확인하지 못했습니다.'
           ..updatedAt = DateTime.now().toUtc()
           ..dirty = true;
-        await _changed();
+        await _changed(syncTodayNotification: false);
         return;
       }
     }
@@ -3544,7 +3548,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     current.error = '일시 중지됨 · 재개하면 처음부터 다시 시작합니다.';
     current.updatedAt = DateTime.now().toUtc();
     current.dirty = true;
-    await _changed();
+    await _changed(syncTodayNotification: false);
   }
 
   Future<void> resumeDownload(DownloadEntry entry) async {
@@ -3856,9 +3860,12 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     return true;
   }
 
-  Future<void> _changed({bool forceSync = false}) async {
+  Future<void> _changed({
+    bool forceSync = false,
+    bool syncTodayNotification = true,
+  }) async {
     await _save();
-    await _syncTodayNotification();
+    if (syncTodayNotification) await _syncTodayNotification();
     notifyListeners();
     if (forceSync || autoSync) unawaited(sync());
   }

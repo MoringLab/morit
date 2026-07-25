@@ -1712,6 +1712,9 @@ String _fileSizeLabel(int bytes) {
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
+String _mediaSizeLabel(int? bytes) =>
+    bytes == null || bytes <= 0 ? '계산 중' : _fileSizeLabel(bytes);
+
 Future<void> _pickInto(
   AppController controller,
   List<PlatformFile> staged,
@@ -2077,7 +2080,7 @@ class _MediaCandidatePicker extends StatelessWidget {
                 '${candidate.isPreview ? '페이지 미리보기 · ' : ''}'
                 '${_mediaKindLabel(candidate.kind)}'
                 '${candidate.qualityLabel == null ? '' : ' · ${candidate.qualityLabel}'}'
-                '${candidate.sizeBytes == null ? '' : ' · ${_fileSizeLabel(candidate.sizeBytes!)}'}'
+                ' · ${_mediaSizeLabel(candidate.sizeBytes)}'
                 ' · ${candidate.mimeType ?? '형식 미확인'}',
               ),
               trailing: Checkbox(
@@ -2400,11 +2403,17 @@ String _downloadStatus(DownloadEntry entry, bool active) {
       backendStatus != null && entry.error == null && entry.progress > 0
       ? '$status · ${entry.progress}%'
       : status;
+  final size = entry.sizeBytes;
+  final withSize = size != null && size > 0
+      ? '$withProgress · ${_fileSizeLabel(size)}'
+      : active
+      ? '$withProgress · 크기 계산 중'
+      : withProgress;
   final location = entry.saveLocation;
   return location == null ||
           !{'queued', 'running', 'paused', 'completed'}.contains(entry.state)
-      ? withProgress
-      : '$withProgress · 저장 위치: 내 파일 > $location';
+      ? withSize
+      : '$withSize · 저장 위치: 내 파일 > $location';
 }
 
 class SettingsPage extends StatelessWidget {
@@ -3339,9 +3348,7 @@ class _ShareCapturePageState extends State<ShareCapturePage> {
                                           Icons.download_rounded,
                                         ),
                                         label: Text(
-                                          saving
-                                              ? '처리 중'
-                                              : '${selectedMediaUrls.length}개 다운로드',
+                                          '${selectedMediaUrls.length}개 다운로드',
                                         ),
                                       ),
                                     ),

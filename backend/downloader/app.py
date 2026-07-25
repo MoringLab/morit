@@ -148,6 +148,13 @@ ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS | {
 IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif", "avif", "heic"}
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm", "mkv", "avi", "ts"}
 AUDIO_EXTENSIONS = {"m4a", "mp3", "aac", "opus", "ogg", "flac", "wav", "mka"}
+COBALT_FIRST_PLATFORMS = {
+    "facebook",
+    "instagram",
+    "threads",
+    "tiktok",
+    "x",
+}
 MIME_BY_EXTENSION = {
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
@@ -1280,6 +1287,31 @@ def _clean_expired() -> None:
         shutil.rmtree(JOB_DIR / oldest.id, ignore_errors=True)
 
 
+def _cached_analysis(user_id: str, source_url: str) -> Analysis | None:
+    # ponytail: MAX_ANALYSES bounds this scan; add a second index only if profiling
+    # shows these 200 in-memory entries matter next to network extraction.
+    return next(
+        (
+            value
+            for value in reversed(analyses.values())
+            if value.user_id == user_id and value.source_url == source_url
+        ),
+        None,
+    )
+
+
+def _analysis_public(value: Analysis, *, cached: bool) -> dict[str, Any]:
+    return {
+        "analysis_id": value.id,
+        "source_url": value.source_url,
+        "provider": value.provider,
+        "title": value.title,
+        "thumbnail_url": value.thumbnail_url,
+        "selections": [item.public() for item in value.selections.values()],
+        "cached": cached,
+    }
+
+
 def _log_failure(failure: EngineFailure, source_url: str) -> None:
     logger.error(
         "engine_failure log_id=%s engine=%s platform=%s code=%s details=%s",
@@ -1312,6 +1344,20 @@ async def analyze(
     body: AnalyzeBody, user_id: str = Depends(current_user)
 ) -> dict[str, Any]:
     _clean_expired()
+    try:
+        source_url = await validate_source_url(body.url)
+    except ValueError as error:
+        raise HTTPException(
+            400, detail={"code": "UNSAFE_OR_UNSUPPORTED_URL", "message": str(error)}
+        ) from error
+    cached = _cached_analysis(user_id, source_url)
+    if cached:
+        logger.info(
+            "analysis_complete platform=%s cached=true elapsed_ms=0 selections=%s",
+            cached.provider,
+            len(cached.selections),
+        )
+        return _analysis_public(cached, cached=True)
     now = time.time()
     recent = [
         value for value in analysis_history.get(user_id, []) if now - value < 60
@@ -1327,13 +1373,8 @@ async def analyze(
         )
     recent.append(now)
     analysis_history[user_id] = recent
-    try:
-        source_url = await validate_source_url(body.url)
-    except ValueError as error:
-        raise HTTPException(
-            400, detail={"code": "UNSAFE_OR_UNSUPPORTED_URL", "message": str(error)}
-        ) from error
     platform = _platform_from_url(source_url)
+    started = time.perf_counter()
     try:
         try:
             await asyncio.wait_for(analysis_slots.acquire(), 0.05)
@@ -1346,13 +1387,18 @@ async def analyze(
                 },
             ) from error
         try:
+            engines = (
+                (_analyze_cobalt, _analyze_ytdlp)
+                if COBALT_API_URL and platform in COBALT_FIRST_PLATFORMS
+                else (_analyze_ytdlp, _analyze_cobalt)
+            )
             try:
-                title, thumbnail, selections_list = await _analyze_ytdlp(source_url)
+                title, thumbnail, selections_list = await engines[0](source_url)
             except EngineFailure as primary:
                 _log_failure(primary, source_url)
                 if not COBALT_API_URL:
                     raise
-                title, thumbnail, selections_list = await _analyze_cobalt(source_url)
+                title, thumbnail, selections_list = await engines[1](source_url)
         finally:
             analysis_slots.release()
     except EngineFailure as failure:
@@ -1370,14 +1416,13 @@ async def analyze(
         selections={item.id: item for item in selections_list},
     )
     analyses[analysis_id] = stored
-    return {
-        "analysis_id": analysis_id,
-        "source_url": source_url,
-        "provider": platform,
-        "title": title,
-        "thumbnail_url": thumbnail,
-        "selections": [item.public() for item in selections_list],
-    }
+    logger.info(
+        "analysis_complete platform=%s cached=false elapsed_ms=%s selections=%s",
+        platform,
+        round((time.perf_counter() - started) * 1000),
+        len(selections_list),
+    )
+    return _analysis_public(stored, cached=False)
 
 
 def _job_public(job: Job, request: Request | None = None) -> dict[str, Any]:
@@ -1565,19 +1610,23 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
-async def _download_instagram_image_once(job: Job, work_dir: Path) -> Path:
-    _, _, refreshed = await _analyze_ytdlp(job.source_url)
-    current = next(
-        (
-            item
-            for item in refreshed
-            if item.engine == "instagram-image"
-            and item.kind == "image"
-            and item.asset_id == job.selection.asset_id
-            and item.playlist_item == job.selection.playlist_item
-        ),
-        None,
-    )
+async def _download_instagram_image_once(
+    job: Job, work_dir: Path, *, refresh: bool
+) -> Path:
+    current = job.selection
+    if refresh or not current.remote_url:
+        _, _, refreshed = await _analyze_ytdlp(job.source_url)
+        current = next(
+            (
+                item
+                for item in refreshed
+                if item.engine == "instagram-image"
+                and item.kind == "image"
+                and item.asset_id == job.selection.asset_id
+                and item.playlist_item == job.selection.playlist_item
+            ),
+            None,
+        )
     url = _instagram_original_image_url(current.remote_url if current else None)
     if not current or not url:
         raise EngineFailure(
@@ -1717,7 +1766,9 @@ async def _download_instagram_image_once(job: Job, work_dir: Path) -> Path:
 async def _download_instagram_image(job: Job, work_dir: Path) -> Path:
     for attempt in range(3):
         try:
-            return await _download_instagram_image_once(job, work_dir)
+            return await _download_instagram_image_once(
+                job, work_dir, refresh=attempt > 0
+            )
         except EngineFailure as failure:
             if not failure.retryable or attempt == 2:
                 raise
@@ -1857,25 +1908,29 @@ async def _safe_remote_url(url: str) -> str:
     return normalized
 
 
-async def _download_cobalt(job: Job, work_dir: Path) -> Path:
-    _, _, refreshed = await _analyze_cobalt(
-        job.source_url, _cobalt_video_quality(job.selection.label)
-    )
-    current = next(
-        (
-            item
-            for item in refreshed
-            if item.kind == job.selection.kind
-            and (
-                item.asset_id == job.selection.asset_id
-                or (
-                    job.selection.playlist_item is not None
-                    and item.playlist_item == job.selection.playlist_item
+async def _download_cobalt(
+    job: Job, work_dir: Path, *, refresh: bool = False
+) -> Path:
+    current = job.selection
+    if refresh or not current.remote_url:
+        _, _, refreshed = await _analyze_cobalt(
+            job.source_url, _cobalt_video_quality(job.selection.label)
+        )
+        current = next(
+            (
+                item
+                for item in refreshed
+                if item.kind == job.selection.kind
+                and (
+                    item.asset_id == job.selection.asset_id
+                    or (
+                        job.selection.playlist_item is not None
+                        and item.playlist_item == job.selection.playlist_item
+                    )
                 )
-            )
-        ),
-        None,
-    )
+            ),
+            None,
+        )
     if current is None or not current.remote_url:
         raise EngineFailure(
             "COBALT_SELECTION_EXPIRED",
@@ -2009,9 +2064,20 @@ async def _download_cobalt(job: Job, work_dir: Path) -> Path:
 
 
 async def _download_cobalt_bounded(job: Job, work_dir: Path) -> Path:
+    async def download() -> Path:
+        for attempt in range(2):
+            try:
+                return await _download_cobalt(job, work_dir, refresh=attempt > 0)
+            except EngineFailure as failure:
+                if not failure.retryable or attempt:
+                    raise
+                for partial in work_dir.glob("media.*"):
+                    partial.unlink(missing_ok=True)
+        raise AssertionError("unreachable")
+
     try:
         return await asyncio.wait_for(
-            _download_cobalt(job, work_dir), DOWNLOAD_TIMEOUT_SECONDS
+            download(), DOWNLOAD_TIMEOUT_SECONDS
         )
     except TimeoutError as error:
         raise EngineFailure(
@@ -2115,6 +2181,8 @@ async def _decode_check(path: Path) -> None:
         "0:v:0?",
         "-map",
         "0:a:0?",
+        "-c",
+        "copy",
         "-f",
         "null",
         "-",
@@ -2279,6 +2347,7 @@ async def _run_job(job: Job) -> None:
     ready = root / "ready"
     work.mkdir(parents=True, exist_ok=True)
     ready.mkdir()
+    started = time.perf_counter()
     try:
         async with job_slots:
             if job.cancel_requested:
@@ -2361,6 +2430,14 @@ async def _run_job(job: Job) -> None:
         job.process = None
         if job.finished_at is None:
             job.finished_at = time.time()
+        logger.info(
+            "job_complete platform=%s engine=%s status=%s elapsed_ms=%s bytes=%s",
+            job.platform,
+            job.selection.engine,
+            job.status,
+            round((time.perf_counter() - started) * 1000),
+            job.content_length or 0,
+        )
 
 
 @app.api_route("/v1/files/{job_id}", methods=["GET", "HEAD"])

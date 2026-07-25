@@ -16,9 +16,11 @@ from fastapi.testclient import TestClient
 
 import app as backend
 from app import (
+    Analysis,
     Job,
     Selection,
     _build_ytdlp_selections,
+    _cached_analysis,
     _compose_cobalt_url,
     _instagram_image_urls,
     _instagram_original_image_url,
@@ -124,6 +126,19 @@ def main() -> None:
     assert len({item.asset_id for item in variants}) == 1
     assert sum(item.recommended for item in variants) == 1
     assert all(item.format_selector for item in variants)
+    cached = Analysis(
+        id="cached-analysis",
+        user_id="cache-user",
+        source_url="https://youtube.com/watch?v=one",
+        provider="youtube",
+        title="sample",
+        thumbnail_url=None,
+        selections={item.id: item for item in variants},
+    )
+    analyses[cached.id] = cached
+    assert _cached_analysis(cached.user_id, cached.source_url) is cached
+    assert _cached_analysis("another-user", cached.source_url) is None
+    analyses.clear()
 
     gallery_info = {
         "id": "gallery",

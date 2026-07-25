@@ -1,13 +1,13 @@
 file=morit-release.apk
 version=1.5.0+8
-sha256=927DD3C1972692D0D080DA337F90AE86F4DBF351FCE05BB5AD19E915212DA487
-bytes=59382186
-built_at=2026-07-25T16:18:24+09:00
+sha256=BA48DC68E5AE227775FB95BF4EBCE28ED6171047DFB64A0834B374AFC1E9C7ED
+bytes=59398563
+built_at=2026-07-25T19:31:00+09:00
 build=flutter build apk --release --dart-define-from-file=config/local.json
-download_api_url_configured=false
+download_api_url_configured=true
 certificate_sha256=5d05f33304d12e06ee8fc42cc366672e0d972c3b2e2c25042ff257e811ab7ef2
 signatures=v2,v3
 verified_on=Android 17 emulator (API 37)
-verification=flutter_analyze;flutter_test_60_of_60;backend_pycompile;backend_test_app;docker_compose_config;docker_image_build;android_unit_5_of_5;compileDebugKotlin;release_install;cold_launch
+verification=flutter_analyze;flutter_test_61_of_61;backend_pycompile;backend_test_app;docker_image_build;server_health;live_instagram_profile;android_unit_5_of_5;compileDebugKotlin;release_install;cold_launch
 apk_secret_scan=sb_secret_0;service_role_jwt_0;private_keys_0;sensitive_zip_entries_0;anon_jwt_1
-limitation=installable backend-ready build; media analysis/download requires a deployed HTTPS DOWNLOAD_API_URL
+limitation=Oracle Always Free E2 Micro backend; one concurrent heavy analysis/download; authenticated physical-device E2E remains

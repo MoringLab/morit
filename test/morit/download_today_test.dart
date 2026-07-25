@@ -23,6 +23,7 @@ void main() {
     saveLocation: 'Movies/Morit',
     fileName: 'video.mp4',
     mimeType: 'video/mp4',
+    sizeBytes: 1048576,
     description: '나중에 보기',
     wifiOnly: true,
     backendJobId: 'job-1',
@@ -55,6 +56,7 @@ void main() {
 
     expect(restored.fileName, 'video.mp4');
     expect(restored.mimeType, 'video/mp4');
+    expect(restored.sizeBytes, 1048576);
     expect(restored.description, '나중에 보기');
     expect(restored.deviceOwned, isTrue);
     expect(restored.nativeId, 73);
@@ -78,6 +80,7 @@ void main() {
       'save_location',
       'file_name',
       'mime_type',
+      'size_bytes',
       'description',
       'wifi_only',
       'headers',

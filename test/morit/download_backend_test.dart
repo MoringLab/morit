@@ -55,4 +55,20 @@ void main() {
 
     expect(job.error?.displayMessage, contains('log:abc123'));
   });
+
+  test('unknown or zero file sizes stay unknown instead of becoming 0B', () {
+    final job = client.jobFromJson({
+      'id': 'job-1',
+      'status': 'complete',
+      'file': {
+        'url': 'https://downloads.example.com/v1/files/job-1',
+        'file_name': 'video.mp4',
+        'mime_type': 'video/mp4',
+        'kind': 'video',
+        'content_length': 0,
+      },
+    });
+
+    expect(job.contentLength, isNull);
+  });
 }
