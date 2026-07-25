@@ -1,0 +1,4 @@
+project_id = "goiyqbdsfoauumuopkno"
+
+[functions.morit-download]
+verify_jwt = true

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="morit_launcher_background">#FFFFFF</color>
+    <color name="today_action_text">#2573E8</color>
+    <color name="today_check_empty">#8B95A1</color>
+    <color name="today_highlight">#FFF1A8</color>
+    <color name="today_text_primary">#191F28</color>
+    <color name="today_text_secondary">#6B7684</color>
+    <color name="today_text_completed">#4E5968</color>
+</resources>

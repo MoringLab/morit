@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="today_action_add">추가</string>
+    <string name="today_action_list">목록</string>
+    <string name="today_check_description">할 일 완료</string>
+</resources>

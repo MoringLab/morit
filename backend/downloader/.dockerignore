@@ -1,0 +1,11 @@
+__pycache__/
+data/
+test_app.py
+README.md
+.env
+.env.*
+!.env.example
+cobalt-keys.json
+cookies.json
+*.cookies.txt
+secrets/

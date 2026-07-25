@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="today_action_text">#72A9F7</color>
+    <color name="today_check_empty">#8B95A1</color>
+    <color name="today_highlight">#5C500D</color>
+    <color name="today_text_primary">#F2F4F6</color>
+    <color name="today_text_secondary">#B0B8C1</color>
+    <color name="today_text_completed">#E5E8EB</color>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "SUPABASE_URL": "https://your-project.supabase.co",
+  "SUPABASE_PUBLISHABLE_KEY": "your-public-anon-or-publishable-key",
+  "AUTH_REDIRECT_URI": "morit://auth/callback",
+  "DOWNLOAD_API_URL": "https://downloads.example.com"
+}
