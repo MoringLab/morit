@@ -13,15 +13,13 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.media.MediaCodecList
-import android.media.MediaExtractor
-import android.media.MediaFormat
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.Log
 import android.webkit.MimeTypeMap
 import android.webkit.URLUtil
 import androidx.core.content.FileProvider
@@ -46,6 +44,7 @@ private const val DOWNLOAD_EXPECTED_LENGTH_SUFFIX = ".expected_length"
 private const val DOWNLOAD_TASK_SUFFIX = ".task"
 private const val DOWNLOAD_TASK_PREFIX = "task."
 private const val DOWNLOAD_COMPLETE_CHANNEL_ID = "download_complete"
+private const val DOWNLOAD_LOG_TAG = "MoritDownload"
 
 internal fun mediaSignatureError(
     bytes: ByteArray,
@@ -138,6 +137,11 @@ internal data class PublicDownloadRequest(
     val expectedContentLength: Long? = null,
 )
 
+internal fun requireValidDownloadId(value: Long): Long {
+    check(value > 0) { "DownloadManager returned an invalid task ID" }
+    return value
+}
+
 internal fun enqueuePublicDownload(
     context: Context,
     value: PublicDownloadRequest,
@@ -228,7 +232,7 @@ internal fun enqueuePublicDownload(
     }
 
     val manager = context.getSystemService(DownloadManager::class.java)
-    val id = manager.enqueue(request)
+    val id = requireValidDownloadId(manager.enqueue(request))
     val stored = context.getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE)
         .edit()
         .putString(id.toString(), directory)
@@ -863,6 +867,14 @@ open class NativeFlutterActivity : FlutterActivity() {
             val lastModifiedMillis = cursor.getLong(
                 cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LAST_MODIFIED_TIMESTAMP),
             )
+            val reason =
+                cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
+            Log.d(
+                DOWNLOAD_LOG_TAG,
+                "event=native_query native=$id status=$status reason=$reason " +
+                    "bytes=$bytesDownloaded total=$totalBytes " +
+                    "expected=${expectedContentLength ?: -1}",
+            )
             val legacyRoot = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
                 ?.absolutePath
             val saveLocation = when {
@@ -904,7 +916,7 @@ open class NativeFlutterActivity : FlutterActivity() {
             mapOf(
                 "id" to id,
                 "status" to status,
-                "reason" to cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)),
+                "reason" to reason,
                 "bytesDownloaded" to bytesDownloaded,
                 "totalBytes" to totalBytes,
                 "expectedContentLength" to expectedContentLength,
@@ -971,43 +983,8 @@ open class NativeFlutterActivity : FlutterActivity() {
             mediaKind = expectedKind,
         )?.let { return it }
 
-        if (expectedKind == "video" || expectedKind == "audio") {
-            val trackFormats = try {
-                contentResolver.openFileDescriptor(uri, "r")?.use { descriptor ->
-                    val extractor = MediaExtractor()
-                    try {
-                        extractor.setDataSource(descriptor.fileDescriptor)
-                        (0 until extractor.trackCount).mapNotNull { index ->
-                            extractor.getTrackFormat(index).takeIf { format ->
-                                format
-                                    .getString(MediaFormat.KEY_MIME)
-                                    ?.startsWith("$expectedKind/") == true
-                            }
-                        }
-                    } finally {
-                        extractor.release()
-                    }
-                }.orEmpty()
-            } catch (_: Exception) {
-                emptyList()
-            }
-            if (trackFormats.isEmpty()) {
-                return if (expectedKind == "video") {
-                    "다운로드된 파일에서 재생 가능한 영상 트랙을 확인하지 못했습니다."
-                } else {
-                    "다운로드된 파일에서 재생 가능한 오디오 트랙을 확인하지 못했습니다."
-                }
-            }
-            val hasDecoder = try {
-                val codecs = MediaCodecList(MediaCodecList.ALL_CODECS)
-                trackFormats.any { codecs.findDecoderForFormat(it) != null }
-            } catch (_: Exception) {
-                true
-            }
-            if (!hasDecoder) {
-                return "다운로드된 파일은 이 기기에서 지원하지 않는 코덱을 사용합니다."
-            }
-        }
+        // Container/codec validation already runs in the backend. Keep this
+        // MethodChannel status query bounded to local size and signature reads.
         return null
     }
 

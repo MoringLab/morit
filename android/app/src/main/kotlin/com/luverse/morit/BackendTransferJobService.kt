@@ -107,6 +107,21 @@ internal fun backendTransferFileName(backendJobId: String, value: String): Strin
 internal fun optionalBackendContentLength(value: Long): Long? =
     value.takeIf { it > 0 }
 
+internal fun nativeDownloadStage(status: Int?, reason: Int): String =
+    when (status) {
+        DownloadManager.STATUS_PENDING -> "device_queued"
+        DownloadManager.STATUS_RUNNING -> "device_download"
+        DownloadManager.STATUS_PAUSED -> when (reason) {
+            DownloadManager.PAUSED_WAITING_TO_RETRY -> "device_retrying"
+            DownloadManager.PAUSED_WAITING_FOR_NETWORK -> "device_waiting_network"
+            DownloadManager.PAUSED_QUEUED_FOR_WIFI -> "device_waiting_wifi"
+            else -> "device_paused"
+        }
+        DownloadManager.STATUS_SUCCESSFUL -> "saved"
+        DownloadManager.STATUS_FAILED -> "failed"
+        else -> "device_download"
+    }
+
 internal object BackendTransferScheduler {
     fun schedule(
         context: Context,
@@ -236,9 +251,8 @@ internal object BackendTransferScheduler {
                 ).roundToInt().coerceIn(0, 100)
             else -> preferences.getInt(key(jobId, "progress"), 0).coerceIn(0, 100)
         }
-        val stage = when (status) {
-            "downloading" -> "device_download"
-            "complete" -> "saved"
+        val stage = when {
+            nativeState != null -> nativeDownloadStage(nativeState.status, nativeState.reason)
             else -> preferences.string(jobId, "stage") ?: status
         }
         val error = when {
@@ -253,6 +267,10 @@ internal object BackendTransferScheduler {
             "progress" to progress,
             "error" to error,
             "nativeId" to nativeId,
+            "nativeStatus" to nativeState?.status,
+            "nativeReason" to nativeState?.reason,
+            "bytesDownloaded" to nativeState?.bytesDownloaded,
+            "totalBytes" to nativeState?.totalBytes,
             "saveLocation" to preferences.string(jobId, "save_location"),
             "updatedAt" to preferences.getLong(key(jobId, "updated_at"), 0L),
         )
