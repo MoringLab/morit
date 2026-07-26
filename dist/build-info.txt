@@ -1,8 +1,8 @@
 file=morit-release.apk
 version=1.5.0+8
-sha256=1FE69FEED11FFE737786B62107C37E7977850A9434C188AA699440D1EE59A0CF
-bytes=59709736
-built_at=2026-07-27T01:05:54+09:00
+sha256=AF7AE9FB8050585B5EE442F83D09AA5607E33C671D4D5116E59B6CA351F0E0BA
+bytes=59709742
+built_at=2026-07-27T01:58:12+09:00
 build=flutter build apk --release --dart-define-from-file=config/local.json
 download_api_url_configured=true
 download_api_url=https://morit-api.moring.co
@@ -10,7 +10,7 @@ certificate_sha256=5d05f33304d12e06ee8fc42cc366672e0d972c3b2e2c25042ff257e811ab7
 signatures=v2,v3
 verified_on=Android 17 emulator (API 37; no physical device connected)
 verification=tunnel_tls_health_200;flutter_analyze;flutter_test_67_of_67;android_native_unit_test;backend_self_test;release_build;apk_signature_v2_v3;release_install;cold_launch
-queue_fix=monotonic_state_and_progress;pending_timeout_removed;expected_size_handoff;active_local_sync_authority;native_task_id_recovery;terminal_cleanup;immediate_cancel_cleanup
+queue_fix=stage_local_progress;native_pending_and_pause_reasons;bounded_native_query;lightweight_completion_validation;background_attachment_copy;valid_native_task_id;raw_native_diagnostics
 server_deployment=home_downloader_rebuilt_and_healthy;oracle_untouched
 server_youtube=6_selections;recommended_240p_download_1.968s;629172_bytes;video_mp4;ffprobe_duration_and_size_ok
 observed_server_logs=youtube_complete_10651130_33163085_76780482_bytes_before_android_timeout

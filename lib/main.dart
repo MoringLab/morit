@@ -2703,7 +2703,14 @@ String _downloadStatus(DownloadEntry entry, bool active) {
           'converting' => '형식 변환 중',
           'validating' => '완료 파일 검증 중',
           'verifying' => '완료 파일 검증 중',
-          'device_queuing' || 'device_download' => '기기에 저장 중',
+          'device_queuing' => '기기 저장 준비 중',
+          'device_queued' => '기기 다운로드 시작 대기 중',
+          'device_download' => '기기에 저장 중',
+          'device_retrying' => '네트워크 오류 후 자동 재시도 중',
+          'device_waiting_network' => '네트워크 연결 대기 중',
+          'device_waiting_wifi' => 'Wi-Fi 연결 대기 중',
+          'device_paused' => '시스템 다운로드 재개 대기 중',
+          'saved' => '기기 저장 완료',
           _ => '서버에서 파일 준비 중',
         }
       : null;

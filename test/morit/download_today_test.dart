@@ -151,7 +151,7 @@ void main() {
     );
   });
 
-  test('native state and progress never move backward', () {
+  test('native state and stage-local progress stay accurate', () {
     expect(mergeNativeDownloadState('running', 1), 'running');
     expect(mergeNativeDownloadState('queued', 1), 'queued');
     expect(mergeNativeDownloadState('running', 8), 'completed');
@@ -166,7 +166,7 @@ void main() {
         bytesDownloaded: 1,
         totalBytes: 100,
       ),
-      91,
+      1,
     );
     expect(
       mergeNativeDownloadProgress(
@@ -176,7 +176,7 @@ void main() {
         bytesDownloaded: 50,
         totalBytes: 100,
       ),
-      92,
+      50,
     );
     expect(
       mergeNativeDownloadProgress(
@@ -186,8 +186,15 @@ void main() {
         bytesDownloaded: 0,
         totalBytes: -1,
       ),
-      85,
+      0,
     );
+    expect(nativeDownloadStage(1, 0), 'device_queued');
+    expect(nativeDownloadStage(2, 0), 'device_download');
+    expect(nativeDownloadStage(4, 1), 'device_retrying');
+    expect(nativeDownloadStage(4, 2), 'device_waiting_network');
+    expect(nativeDownloadStage(4, 3), 'device_waiting_wifi');
+    expect(nativeDownloadStage(4, 4), 'device_paused');
+    expect(nativeDownloadStage(8, 0), 'saved');
   });
 
   test('active device downloads remain authoritative during sync', () {

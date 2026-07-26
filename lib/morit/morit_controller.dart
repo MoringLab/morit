@@ -200,13 +200,29 @@ int mergeNativeDownloadProgress({
   required int totalBytes,
 }) {
   if (nativeStatus == 8) return 100;
-  if (bytesDownloaded < 0 || totalBytes <= 0) return currentProgress;
+  if (bytesDownloaded < 0 || totalBytes <= 0) {
+    // Older builds stored the backend/device handoff itself as 85%.
+    return mode == 'proxy' && currentProgress >= 85 ? 0 : currentProgress;
+  }
   final deviceProgress = (bytesDownloaded * 100 ~/ totalBytes).clamp(0, 100);
-  final next = mode == 'proxy'
-      ? 85 + deviceProgress * 15 ~/ 100
-      : deviceProgress;
-  return next > currentProgress ? next : currentProgress;
+  return mode == 'proxy'
+      ? deviceProgress
+      : deviceProgress > currentProgress
+      ? deviceProgress
+      : currentProgress;
 }
+
+String nativeDownloadStage(int? status, int reason) => switch (status) {
+  1 => 'device_queued',
+  2 => 'device_download',
+  4 when reason == 1 => 'device_retrying',
+  4 when reason == 2 => 'device_waiting_network',
+  4 when reason == 3 => 'device_waiting_wifi',
+  4 => 'device_paused',
+  8 => 'saved',
+  16 => 'failed',
+  _ => 'device_download',
+};
 
 bool keepLocalDownloadDuringSync(
   DownloadEntry entry, {
@@ -334,6 +350,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   bool _pollingDownloads = false;
   Future<bool>? _notificationPermissionRequest;
   final Map<String, Object> _downloadAttempts = {};
+  final Set<String> _completedAttachmentAttempts = {};
   bool _resuming = false;
   bool _accessEnabled = false;
   int _accessRevision = 0;
@@ -2884,7 +2901,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       } else {
         entry
           ..state = job.status == 'queued' ? 'queued' : 'running'
-          ..progress = (job.progress * 85 ~/ 100).clamp(0, 84);
+          ..progress = job.progress.clamp(0, 99).toInt();
         final transferUrl = job.transferUrl;
         if (transferUrl != null) {
           var scheduled = false;
@@ -2963,7 +2980,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         {'device_queuing', 'device_download'}.contains(entry.backendStage)) {
       return;
     }
-    entry.backendStage = 'device_queuing';
+    entry
+      ..backendStage = 'device_queuing'
+      ..progress = 0;
     final fileUrl = job.fileUrl;
     final fileName = job.fileName;
     final kind = job.kind;
@@ -3086,8 +3105,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final downloadUri = resolvedCandidate.url;
     final startingState = entry.mode == 'proxy' ? 'running' : 'queued';
     entry.state = startingState;
-    if (entry.mode == 'proxy' && entry.progress < 85) entry.progress = 85;
-    if (entry.mode != 'proxy') entry.progress = 0;
+    entry.progress = 0;
     entry.nativeId = null;
     entry.nativeBackendTransferOwned = false;
     entry.localPath = null;
@@ -3288,6 +3306,39 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _attachCompletedDownloadInBackground(String entryId) async {
+    if (!_completedAttachmentAttempts.add(entryId)) return;
+    try {
+      final entry = downloads
+          .where(
+            (value) =>
+                value.id == entryId &&
+                !value.deleted &&
+                value.state == 'completed',
+          )
+          .firstOrNull;
+      if (entry == null) return;
+      final attachment = await _attachCompletedDownload(entry);
+      if (!identical(
+        downloads.where((value) => value.id == entryId).firstOrNull,
+        entry,
+      )) {
+        return;
+      }
+      if (attachment.error != null) entry.error = attachment.error;
+      if (!attachment.changed && attachment.error == null) return;
+      entry
+        ..updatedAt = DateTime.now().toUtc()
+        ..dirty = true;
+      await _changed(
+        forceSync: attachment.changed,
+        syncTodayNotification: false,
+      );
+    } finally {
+      _completedAttachmentAttempts.remove(entryId);
+    }
+  }
+
   Future<void> pollDownloads() async {
     final userId = user?.id;
     if (!_accessEnabled || userId == null || _pollingDownloads) return;
@@ -3314,7 +3365,6 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _pollingDownloads = true;
     var changed = false;
     var syncRequired = false;
-    var attachmentSyncRequired = false;
     try {
       for (final pendingEntry in pendingBackend) {
         final entry = downloads
@@ -3354,9 +3404,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
                   ..saveLocation =
                       native['saveLocation'] as String? ?? entry.saveLocation
                   ..nativeBackendTransferOwned = false
-                  ..backendStage = 'device_download'
+                  ..backendStage = native['stage'] as String? ?? 'device_queued'
                   ..state = entry.state == 'queued' ? 'running' : entry.state
-                  ..progress = entry.progress < 85 ? 85 : entry.progress
+                  ..progress = nativeProgress
                   ..error = null;
                 _downloadAttempts.remove(entry.id);
                 pendingNative.add((id: entry.id, nativeId: nativeId));
@@ -3365,7 +3415,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
                   entry.state,
                   nativeStatus,
                 );
-                final nextProgress = (nativeProgress * 85 ~/ 100).clamp(0, 84);
+                final nextProgress = nativeProgress.clamp(0, 99).toInt();
                 entry
                   ..state = nextState
                   ..progress = nextProgress > entry.progress
@@ -3402,7 +3452,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
               entry.state,
               job.status,
             );
-            final nextProgress = (job.progress * 85 ~/ 100).clamp(0, 84);
+            final nextProgress = job.progress.clamp(0, 99).toInt();
             entry
               ..state = nextState
               ..progress = nextProgress > entry.progress
@@ -3459,7 +3509,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
           int? nativeReason;
           int? nativeDownloaded;
           int? nativeTotal;
-          final raw = await _platform.queryDownload(pendingEntry.nativeId);
+          final raw = await _platform
+              .queryDownload(pendingEntry.nativeId)
+              .timeout(const Duration(seconds: 10));
           if (user?.id != userId) return;
           final entry = downloads
               .where((value) => value.id == pendingEntry.id)
@@ -3505,6 +3557,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
                 bytesDownloaded: downloaded,
                 totalBytes: knownTotal,
               );
+              entry.backendStage = nativeDownloadStage(status, reason);
             }
             entry.state = mergeNativeDownloadState(entry.state, status);
             entry.localPath = raw['localUri'] as String? ?? entry.localPath;
@@ -3533,13 +3586,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
             } else {
               entry.error = null;
               if (entry.state == 'completed' && previous.state != 'completed') {
-                final attachment = await _attachCompletedDownload(entry);
-                if (attachment.error != null) entry.error = attachment.error;
-                if (attachment.changed) {
-                  changed = true;
-                  syncRequired = true;
-                  attachmentSyncRequired = true;
-                }
+                unawaited(_attachCompletedDownloadInBackground(entry.id));
               }
             }
             if (const {
@@ -3590,16 +3637,31 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
             }
             changed = true;
           }
-        } on PlatformException {
+        } on TimeoutException {
+          debugPrint(
+            'MoritDownload event=device_query_timeout '
+            'entry=${pendingEntry.id} native=${pendingEntry.nativeId}',
+          );
+        } on PlatformException catch (error) {
+          debugPrint(
+            'MoritDownload event=device_query_error '
+            'entry=${pendingEntry.id} native=${pendingEntry.nativeId} '
+            'code=${error.code}',
+          );
           // A transient MethodChannel/query failure does not stop the native job.
-        } on Object {
+        } on Object catch (error) {
+          debugPrint(
+            'MoritDownload event=device_query_error '
+            'entry=${pendingEntry.id} native=${pendingEntry.nativeId} '
+            'type=${error.runtimeType}',
+          );
           // Keep polling; retrying here could enqueue the same download twice.
         }
       }
       if (changed) {
         await _save(userId);
         notifyListeners();
-        if (attachmentSyncRequired || syncRequired && autoSync) {
+        if (syncRequired && autoSync) {
           unawaited(sync());
         }
       }
