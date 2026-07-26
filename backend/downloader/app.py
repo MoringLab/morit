@@ -189,7 +189,11 @@ class AnalyzeBody(BaseModel):
 class JobBody(BaseModel):
     analysis_id: str = Field(min_length=8, max_length=100)
     selection_id: str = Field(min_length=8, max_length=100)
-    request_id: str = Field(min_length=8, max_length=100)
+    request_id: str = Field(
+        min_length=8,
+        max_length=100,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 @dataclass
@@ -1606,6 +1610,14 @@ async def create_job(
     )
     jobs[job_id] = job
     job.task = asyncio.create_task(_run_job(job))
+    logger.info(
+        "job_queued job_id=%s request_id=%s platform=%s engine=%s active=%s",
+        job.id,
+        job.request_id,
+        job.platform,
+        job.selection.engine,
+        len(active_jobs) + 1,
+    )
     return _job_public(job, request)
 
 
@@ -1665,6 +1677,14 @@ async def cancel_job(
             pass
         except TimeoutError:
             pass
+    if job.task is None or job.task.done():
+        _finish_canceled_job(job)
+    logger.info(
+        "job_cancel job_id=%s request_id=%s status=%s",
+        job.id,
+        job.request_id,
+        job.status,
+    )
     return _job_public(job, request)
 
 
@@ -2486,6 +2506,24 @@ async def _validate_media(
     return extension, mime, size
 
 
+def _finish_canceled_job(job: Job) -> None:
+    if job.status in {"complete", "failed", "canceled"}:
+        return
+    failed_stage = job.stage
+    job.status = "canceled"
+    job.stage = "canceled"
+    job.error = {
+        "code": "CANCELED",
+        "message": "사용자가 다운로드를 취소했습니다.",
+        "engine": job.selection.engine,
+        "platform": job.platform,
+        "retryable": True,
+        "stage": failed_stage,
+    }
+    job.finished_at = time.time()
+    shutil.rmtree(JOB_DIR / job.id, ignore_errors=True)
+
+
 async def _run_job(job: Job) -> None:
     root = JOB_DIR / job.id
     work = root / "work"
@@ -2495,6 +2533,15 @@ async def _run_job(job: Job) -> None:
     started = time.perf_counter()
     try:
         async with job_slots:
+            logger.info(
+                "job_start job_id=%s request_id=%s platform=%s engine=%s "
+                "queue_wait_ms=%s",
+                job.id,
+                job.request_id,
+                job.platform,
+                job.selection.engine,
+                round((time.perf_counter() - started) * 1000),
+            )
             if job.cancel_requested:
                 raise asyncio.CancelledError
             job.status = "running"
@@ -2533,18 +2580,7 @@ async def _run_job(job: Job) -> None:
             job.finished_at = time.time()
             _persist_completed_job(job)
     except asyncio.CancelledError:
-        failed_stage = job.stage
-        job.status = "canceled"
-        job.stage = "canceled"
-        job.error = {
-            "code": "CANCELED",
-            "message": "사용자가 다운로드를 취소했습니다.",
-            "engine": job.selection.engine,
-            "platform": job.platform,
-            "retryable": True,
-            "stage": failed_stage,
-        }
-        shutil.rmtree(root, ignore_errors=True)
+        _finish_canceled_job(job)
     except EngineFailure as failure:
         failed_stage = job.stage
         if failure.platform == "server":
@@ -2576,7 +2612,10 @@ async def _run_job(job: Job) -> None:
         if job.finished_at is None:
             job.finished_at = time.time()
         logger.info(
-            "job_complete platform=%s engine=%s status=%s elapsed_ms=%s bytes=%s",
+            "job_complete job_id=%s request_id=%s platform=%s engine=%s "
+            "status=%s elapsed_ms=%s bytes=%s",
+            job.id,
+            job.request_id,
             job.platform,
             job.selection.engine,
             job.status,

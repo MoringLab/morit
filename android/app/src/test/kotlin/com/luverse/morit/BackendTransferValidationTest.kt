@@ -40,6 +40,13 @@ class BackendTransferValidationTest {
     }
 
     @Test
+    fun unknownContentLengthDoesNotBlockDeviceHandoff() {
+        assertEquals(null, optionalBackendContentLength(-1))
+        assertEquals(null, optionalBackendContentLength(0))
+        assertEquals(42L, optionalBackendContentLength(42))
+    }
+
+    @Test
     fun fileNameIsLeafOnlyBoundedAndJobScoped() {
         val fileName = backendTransferFileName(
             "0123456789abcdef0123456789abcdef",

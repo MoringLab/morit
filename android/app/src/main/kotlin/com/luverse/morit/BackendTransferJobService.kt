@@ -14,6 +14,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
+import android.util.Log
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.URI
@@ -32,6 +33,7 @@ private const val STATUS_READ_TIMEOUT_MILLIS = 20_000
 private const val MAX_STATUS_RESPONSE_BYTES = 1024 * 1024
 private const val MIN_BACKOFF_MILLIS = 10_000L
 private const val DOWNLOAD_PREPARATION_CHANNEL_ID = "download_preparation"
+private const val DOWNLOAD_LOG_TAG = "MoritDownload"
 
 private val backendJobIdPattern = Regex("""^[A-Za-z0-9_-]{8,100}$""")
 private val opaqueTicketPattern = Regex("""[A-Za-z0-9_-]{43,}""")
@@ -101,6 +103,9 @@ internal fun backendTransferFileName(backendJobId: String, value: String): Strin
         .take((200 - prefix.length - extension.length).coerceAtLeast(1))
     return prefix + stem + extension
 }
+
+internal fun optionalBackendContentLength(value: Long): Long? =
+    value.takeIf { it > 0 }
 
 internal object BackendTransferScheduler {
     fun schedule(
@@ -187,6 +192,10 @@ internal object BackendTransferScheduler {
                     .putLong(key(jobId, "updated_at"), System.currentTimeMillis())
                     .commit()
             } else {
+                Log.i(
+                    DOWNLOAD_LOG_TAG,
+                    "event=scheduled job=$jobId scheduler=$schedulerId",
+                )
                 updateNotification(appContext, jobId)
             }
             return scheduled
@@ -269,6 +278,9 @@ internal object BackendTransferScheduler {
                 .putLong(key(jobId, "updated_at"), System.currentTimeMillis())
                 .also { editor ->
                     nativeId?.let { editor.remove("$NATIVE_OWNER_PREFIX$it") }
+                    if (schedulerId >= 0) {
+                        editor.remove("$SCHEDULER_OWNER_PREFIX$schedulerId")
+                    }
                 }
                 .commit()
             if (schedulerId >= 0) {
@@ -292,6 +304,7 @@ internal object BackendTransferScheduler {
             val nativeState = queryNativeDownload(appContext, nativeId) ?: return
             val editor = preferences.edit()
                 .putLong(key(backendJobId, "updated_at"), System.currentTimeMillis())
+                .remove("$NATIVE_OWNER_PREFIX$nativeId")
             when (nativeState.status) {
                 DownloadManager.STATUS_SUCCESSFUL -> editor
                     .putString(key(backendJobId, "status"), "complete")
@@ -307,6 +320,23 @@ internal object BackendTransferScheduler {
                     )
             }
             editor.commit()
+        }
+    }
+
+    fun releaseSchedulerOwner(
+        context: Context,
+        backendJobId: String,
+        schedulerId: Int,
+    ) {
+        val preferences = preferences(context.applicationContext)
+        synchronized(backendTransferLock) {
+            if (preferences.getString("$SCHEDULER_OWNER_PREFIX$schedulerId", null) ==
+                backendJobId
+            ) {
+                preferences.edit()
+                    .remove("$SCHEDULER_OWNER_PREFIX$schedulerId")
+                    .apply()
+            }
         }
     }
 
@@ -430,6 +460,8 @@ internal object BackendTransferScheduler {
         }
 
         val json = response.value
+        val previousStatus = preferences.string(backendJobId, "status") ?: "scheduled"
+        val previousProgress = preferences.getInt(key(backendJobId, "progress"), 0)
         val status = json.optString("status").trim().lowercase()
         val stage = safeStage(json.optString("stage"), status)
         val rawProgress = json.optDouble("progress", 0.0)
@@ -452,6 +484,12 @@ internal object BackendTransferScheduler {
                 }
                 .putLong(key(backendJobId, "updated_at"), System.currentTimeMillis())
                 .commit()
+            Log.i(
+                DOWNLOAD_LOG_TAG,
+                "event=backend_transition job=$backendJobId " +
+                    "state=$previousStatus->$status progress=$previousProgress->$progress " +
+                    "stage=$stage",
+            )
             return true
         }
         if (status in setOf("failed", "error")) {
@@ -494,10 +532,11 @@ internal object BackendTransferScheduler {
             .trim()
             .lowercase()
         val mediaKind = file.optString("kind").trim().lowercase()
-        val contentLength = file.optLong("content_length", -1L)
+        val contentLength = optionalBackendContentLength(
+            file.optLong("content_length", -1L),
+        )
         if (!mimeTypePattern.matches(mimeType) ||
-            mediaKind !in setOf("image", "video", "audio", "file") ||
-            contentLength <= 0
+            mediaKind !in setOf("image", "video", "audio", "file")
         ) {
             storeFailure(preferences, backendJobId, "The backend returned invalid file metadata.")
             return false
@@ -545,6 +584,11 @@ internal object BackendTransferScheduler {
                     .putLong(key(backendJobId, "updated_at"), System.currentTimeMillis())
                     .putString("$NATIVE_OWNER_PREFIX$nativeId", backendJobId)
                     .commit()
+                Log.i(
+                    DOWNLOAD_LOG_TAG,
+                    "event=device_enqueued job=$backendJobId native=$nativeId " +
+                        "expected_bytes=${contentLength ?: -1}",
+                )
                 false
             } catch (_: Exception) {
                 updateWaiting(
@@ -575,16 +619,14 @@ internal object BackendTransferScheduler {
         message: String?,
     ) {
         if (preferences.string(backendJobId, "status") == "canceled") return
+        Log.w(
+            DOWNLOAD_LOG_TAG,
+            "event=backend_poll_retry job=$backendJobId " +
+                "state=${preferences.string(backendJobId, "status") ?: "unknown"} " +
+                "detail=${safePublicError(message) ?: "-"}",
+        )
         preferences.edit()
-            .putString(key(backendJobId, "status"), "waiting")
-            .putString(key(backendJobId, "stage"), "waiting_backend")
-            .also { editor ->
-                if (message == null) {
-                    editor.remove(key(backendJobId, "error"))
-                } else {
-                    editor.putString(key(backendJobId, "error"), safePublicError(message))
-                }
-            }
+            .remove(key(backendJobId, "error"))
             .putLong(key(backendJobId, "updated_at"), System.currentTimeMillis())
             .commit()
     }
@@ -596,15 +638,20 @@ internal object BackendTransferScheduler {
     ) {
         synchronized(backendTransferLock) {
             if (preferences.string(backendJobId, "status") == "canceled") return
+            val previousStatus =
+                preferences.string(backendJobId, "status") ?: "unknown"
+            val safeMessage = safePublicError(message) ?: "The transfer failed."
             preferences.edit()
                 .putString(key(backendJobId, "status"), "failed")
                 .putString(key(backendJobId, "stage"), "failed")
-                .putString(
-                    key(backendJobId, "error"),
-                    safePublicError(message) ?: "The transfer failed.",
-                )
+                .putString(key(backendJobId, "error"), safeMessage)
                 .putLong(key(backendJobId, "updated_at"), System.currentTimeMillis())
                 .commit()
+            Log.e(
+                DOWNLOAD_LOG_TAG,
+                "event=backend_failed job=$backendJobId " +
+                    "state=$previousStatus->failed detail=$safeMessage",
+            )
         }
     }
 }
@@ -623,7 +670,9 @@ class BackendTransferJobService : JobService() {
             }
             val retry = try {
                 var polls = 0
-                while (active() && BackendTransferScheduler.shouldRetry(this, backendJobId)) {
+                while (active() &&
+                    BackendTransferScheduler.shouldRetry(this, backendJobId)
+                ) {
                     val keepPolling = BackendTransferScheduler.poll(
                         this,
                         backendJobId,
@@ -637,7 +686,12 @@ class BackendTransferJobService : JobService() {
                 !active() && BackendTransferScheduler.shouldRetry(this, backendJobId)
             } catch (_: InterruptedException) {
                 BackendTransferScheduler.shouldRetry(this, backendJobId)
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                Log.w(
+                    DOWNLOAD_LOG_TAG,
+                    "event=job_service_error job=$backendJobId " +
+                        "type=${error.javaClass.simpleName}",
+                )
                 BackendTransferScheduler.shouldRetry(this, backendJobId)
             }
             val shouldFinish = synchronized(generationLock) {
@@ -648,7 +702,20 @@ class BackendTransferJobService : JobService() {
                     false
                 }
             }
-            if (shouldFinish) jobFinished(params, retry)
+            if (shouldFinish) {
+                if (!retry) {
+                    BackendTransferScheduler.releaseSchedulerOwner(
+                        this,
+                        backendJobId,
+                        params.jobId,
+                    )
+                }
+                Log.i(
+                    DOWNLOAD_LOG_TAG,
+                    "event=job_service_finish job=$backendJobId retry=$retry",
+                )
+                jobFinished(params, retry)
+            }
         }
         return true
     }

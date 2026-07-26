@@ -22,6 +22,7 @@ from app import (
     _build_ytdlp_selections,
     _cached_analysis,
     _compose_cobalt_url,
+    _finish_canceled_job,
     _instagram_image_urls,
     _instagram_original_image_url,
     _map_engine_failure,
@@ -403,6 +404,49 @@ def main() -> None:
         assert transfer.status_code == 200
         assert transfer.json()["file"]["content_length"] == size
 
+    retry_analysis = Analysis(
+        id="retry-analysis",
+        user_id="dev-local",
+        source_url=job.source_url,
+        provider="youtube",
+        title="retry",
+        thumbnail_url=None,
+        selections={selection.id: selection},
+    )
+    analyses[retry_analysis.id] = retry_analysis
+    real_run_job = backend._run_job
+
+    async def wait_until_canceled(_: Job) -> None:
+        await asyncio.Event().wait()
+
+    backend._run_job = wait_until_canceled
+    try:
+        with TestClient(app) as client:
+            headers = {"Authorization": "Bearer dev-local"}
+            body = {
+                "analysis_id": retry_analysis.id,
+                "selection_id": selection.id,
+                "request_id": "retry-request",
+            }
+            first = client.post("/v1/jobs", json=body, headers=headers)
+            assert first.status_code == 200, first.text
+            first_id = first.json()["id"]
+            canceled_response = client.delete(
+                f"/v1/jobs/{first_id}",
+                headers=headers,
+            )
+            assert canceled_response.json()["status"] == "canceled"
+            retried = client.post("/v1/jobs", json=body, headers=headers)
+            assert retried.status_code == 200, retried.text
+            assert retried.json()["id"] != first_id
+            client.delete(
+                f"/v1/jobs/{retried.json()['id']}",
+                headers=headers,
+            )
+    finally:
+        backend._run_job = real_run_job
+        analyses.pop(retry_analysis.id, None)
+
     persisted_id = "a" * 32
     persisted_ready = backend.JOB_DIR / persisted_id / "ready"
     persisted_ready.mkdir(parents=True)
@@ -418,6 +462,23 @@ def main() -> None:
     jobs.pop(persisted.id, None)
     _restore_completed_jobs()
     assert jobs[persisted.id].file_path == persisted_file.resolve()
+
+    canceled = replace(
+        job,
+        id="cancel-race",
+        status="queued",
+        stage="queued",
+        file_path=None,
+        content_length=None,
+        finished_at=None,
+    )
+    canceled_root = backend.JOB_DIR / canceled.id
+    canceled_root.mkdir(parents=True)
+    (canceled_root / "partial.tmp").write_bytes(b"partial")
+    _finish_canceled_job(canceled)
+    assert canceled.status == "canceled"
+    assert canceled.finished_at is not None
+    assert not canceled_root.exists()
 
     jobs.clear()
     active = replace(

@@ -43,6 +43,8 @@ private const val DOWNLOAD_MIME_SUFFIX = ".mime"
 private const val DOWNLOAD_NAME_SUFFIX = ".name"
 private const val DOWNLOAD_KIND_SUFFIX = ".kind"
 private const val DOWNLOAD_EXPECTED_LENGTH_SUFFIX = ".expected_length"
+private const val DOWNLOAD_TASK_SUFFIX = ".task"
+private const val DOWNLOAD_TASK_PREFIX = "task."
 private const val DOWNLOAD_COMPLETE_CHANNEL_ID = "download_complete"
 
 internal fun mediaSignatureError(
@@ -125,6 +127,7 @@ private fun ByteArray.hasAsciiPrefix(expected: String): Boolean =
 
 internal data class PublicDownloadRequest(
     val url: String,
+    val taskId: String? = null,
     val fileName: String?,
     val title: String?,
     val mediaKind: String,
@@ -173,6 +176,7 @@ internal fun enqueuePublicDownload(
     require(value.expectedContentLength == null || value.expectedContentLength > 0) {
         "expectedContentLength must be positive"
     }
+    val taskId = value.taskId?.let(::requireBackendTransferJobId)
 
     val requestedName = value.fileName?.trim()
     val guessedName = requestedName
@@ -225,18 +229,26 @@ internal fun enqueuePublicDownload(
 
     val manager = context.getSystemService(DownloadManager::class.java)
     val id = manager.enqueue(request)
-    context.getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE)
+    val stored = context.getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE)
         .edit()
         .putString(id.toString(), directory)
         .putString("$id$DOWNLOAD_MIME_SUFFIX", mimeType)
         .putString("$id$DOWNLOAD_NAME_SUFFIX", fileName)
         .putString("$id$DOWNLOAD_KIND_SUFFIX", value.mediaKind)
         .also { editor ->
+            taskId?.let {
+                editor.putString("$id$DOWNLOAD_TASK_SUFFIX", it)
+                editor.putLong("$DOWNLOAD_TASK_PREFIX$it", id)
+            }
             value.expectedContentLength?.let {
                 editor.putLong("$id$DOWNLOAD_EXPECTED_LENGTH_SUFFIX", it)
             } ?: editor.remove("$id$DOWNLOAD_EXPECTED_LENGTH_SUFFIX")
         }
-        .apply()
+        .commit()
+    if (!stored) {
+        manager.remove(id)
+        throw IllegalStateException("download metadata could not be stored")
+    }
     return mapOf(
         "id" to id,
         "saveLocation" to "$directory/$DOWNLOAD_SUBDIRECTORY",
@@ -419,6 +431,7 @@ open class NativeFlutterActivity : FlutterActivity() {
                         "enqueueDownload" -> enqueueDownload(call, result)
                         "cancelDownload" -> result.success(cancelDownload(requiredLong(call, "id")))
                         "queryDownload" -> result.success(queryDownload(requiredLong(call, "id")))
+                        "queryDownloadTask" -> result.success(queryDownloadTask(call))
                         "scheduleBackendTransfer" -> {
                             result.success(
                                 BackendTransferScheduler.schedule(
@@ -542,6 +555,7 @@ open class NativeFlutterActivity : FlutterActivity() {
             this,
             PublicDownloadRequest(
                 url = call.argument<String>("url").orEmpty(),
+                taskId = requiredString(call, "taskId"),
                 fileName = call.argument<String>("fileName"),
                 title = call.argument<String>("title"),
                 mediaKind = call.argument<String>("mediaKind").orEmpty(),
@@ -559,6 +573,19 @@ open class NativeFlutterActivity : FlutterActivity() {
         val removed = downloadManager().remove(id)
         clearDownloadPreferences(id)
         return removed
+    }
+
+    private fun queryDownloadTask(call: MethodCall): Long? {
+        val taskId = requireBackendTransferJobId(requiredString(call, "taskId"))
+        val preferences =
+            getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE)
+        if (!preferences.contains("$DOWNLOAD_TASK_PREFIX$taskId")) return null
+        val nativeId = preferences.getLong("$DOWNLOAD_TASK_PREFIX$taskId", -1L)
+        if (nativeId <= 0 || queryDownload(nativeId) == null) {
+            preferences.edit().remove("$DOWNLOAD_TASK_PREFIX$taskId").apply()
+            return null
+        }
+        return nativeId
     }
 
     private fun publishLegacyDownloadsOnce() {
@@ -865,6 +892,7 @@ open class NativeFlutterActivity : FlutterActivity() {
                         "reason" to 0,
                         "bytesDownloaded" to bytesDownloaded,
                         "totalBytes" to totalBytes,
+                        "expectedContentLength" to expectedContentLength,
                         "localUri" to null,
                         "lastModifiedMillis" to lastModifiedMillis,
                         "saveLocation" to saveLocation,
@@ -879,6 +907,7 @@ open class NativeFlutterActivity : FlutterActivity() {
                 "reason" to cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)),
                 "bytesDownloaded" to bytesDownloaded,
                 "totalBytes" to totalBytes,
+                "expectedContentLength" to expectedContentLength,
                 "localUri" to localUri,
                 "lastModifiedMillis" to lastModifiedMillis,
                 "saveLocation" to saveLocation,
@@ -886,13 +915,19 @@ open class NativeFlutterActivity : FlutterActivity() {
         }
 
     private fun clearDownloadPreferences(id: Long) {
-        getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE)
-            .edit()
+        val preferences =
+            getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE)
+        val taskId = preferences.getString("$id$DOWNLOAD_TASK_SUFFIX", null)
+        preferences.edit()
             .remove(id.toString())
             .remove("$id$DOWNLOAD_MIME_SUFFIX")
             .remove("$id$DOWNLOAD_NAME_SUFFIX")
             .remove("$id$DOWNLOAD_KIND_SUFFIX")
             .remove("$id$DOWNLOAD_EXPECTED_LENGTH_SUFFIX")
+            .remove("$id$DOWNLOAD_TASK_SUFFIX")
+            .also { editor ->
+                taskId?.let { editor.remove("$DOWNLOAD_TASK_PREFIX$it") }
+            }
             .apply()
     }
 

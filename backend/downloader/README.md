@@ -47,7 +47,7 @@ RFC1918, link-local 및 클라우드 metadata 대역으로 나가지 못하게 �
 - `MAX_FILE_BYTES`(기본 2 GiB), `VALIDATION_TIMEOUT_SECONDS`(기본 600)
 - `ANALYSIS_TTL_SECONDS`(기본 900), `FILE_TTL_SECONDS`(기본 604800/7일)
 - `YT_DLP_JS_RUNTIME`: `deno`(기본), `node`, `quickjs`
-- `YT_DLP_FORCE_IPV6=true`: IPv6가 구성된 배포에서 YouTube yt-dlp 연결을 IPv6로 강제
+- `YT_DLP_FORCE_IPV6=true`: IPv6가 구성된 배포에서만 YouTube yt-dlp 연결을 IPv6로 강제
 - `DEV_AUTH_BYPASS=true`: 로컬 테스트 전용. 이때도 `Bearer dev-local`이 필요함
 
 `DEV_AUTH_BYPASS`는 운영에서 절대 활성화하지 않습니다. Supabase의 service-role
@@ -122,6 +122,15 @@ cp .env.example .env
 # .env의 Supabase와 PUBLIC_BASE_URL 값 설정
 docker compose up -d --build
 ```
+
+기본 compose는 일반적인 IPv4 환경에서 동작합니다. Oracle처럼 IPv6 우선 통신이
+필요한 환경에서 새로 배포할 때만 다음 override를 추가합니다.
+
+```bash
+docker compose -f compose.yaml -f compose.oracle.yaml up -d --build
+```
+
+이미 실행 중인 Oracle 배포에는 이 파일을 적용하기 전까지 아무 변화가 없습니다.
 
 `.env`, `cobalt-keys.json`, `cookies.json`, `secrets/`는 Git과 Docker build
 context에서 제외됩니다. `.env.example`에는 placeholder만 있으며 실제 API key나

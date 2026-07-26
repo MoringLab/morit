@@ -117,6 +117,7 @@ final class MoritPlatform {
       _native.invokeMethod<void>('cancelReminder', {'id': id, 'key': key});
 
   Future<({int id, String saveLocation})?> enqueueDownload({
+    required String taskId,
     required Uri url,
     required String fileName,
     required String title,
@@ -127,6 +128,9 @@ final class MoritPlatform {
     bool wifiOnly = false,
     Map<String, String> headers = const {},
   }) async {
+    if (!RegExp(r'^[A-Za-z0-9_-]{8,100}$').hasMatch(taskId)) {
+      throw ArgumentError.value(taskId, 'taskId', 'must be an opaque task ID');
+    }
     if (url.toString().length > 8192 ||
         url.scheme != 'https' ||
         url.host.isEmpty ||
@@ -154,6 +158,7 @@ final class MoritPlatform {
     }
     final value = await _native
         .invokeMapMethod<String, dynamic>('enqueueDownload', {
+          'taskId': taskId,
           'url': url.toString(),
           'fileName': fileName,
           'mediaKind': mediaKind,
@@ -181,6 +186,9 @@ final class MoritPlatform {
 
   Future<Map<String, dynamic>?> queryDownload(int id) =>
       _native.invokeMapMethod<String, dynamic>('queryDownload', {'id': id});
+
+  Future<int?> queryDownloadTask(String taskId) =>
+      _native.invokeMethod<int>('queryDownloadTask', {'taskId': taskId});
 
   Future<bool> scheduleBackendTransfer({
     required Uri statusUrl,
