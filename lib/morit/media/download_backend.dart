@@ -15,6 +15,7 @@ final class DownloadBackendException implements Exception {
     this.engine,
     this.platform,
     this.logId,
+    this.fallbacks = const [],
     this.retryable = false,
   });
 
@@ -24,6 +25,7 @@ final class DownloadBackendException implements Exception {
   final String? engine;
   final String? platform;
   final String? logId;
+  final List<String> fallbacks;
   final bool retryable;
 
   String get displayMessage {
@@ -33,7 +35,10 @@ final class DownloadBackendException implements Exception {
       code,
       if (logId case final value?) 'log:$value',
     ].whereType<String>().where((value) => value.isNotEmpty).join(' / ');
-    return details.isEmpty ? message : '$message [$details]';
+    final primary = details.isEmpty ? message : '$message [$details]';
+    return fallbacks.isEmpty
+        ? primary
+        : '$primary · 대체 엔진: ${fallbacks.join(', ')}';
   }
 
   @override
@@ -175,6 +180,7 @@ final class DownloadBackendClient {
               final size? when size > 0 => size,
               _ => null,
             },
+            sizeEstimated: value['size_estimated'] == true,
             recommended: value['recommended'] == true,
           ),
         );
@@ -437,8 +443,21 @@ DownloadBackendException _backendError(Map<String, dynamic> value) =>
       engine: _nonEmpty(value['engine']),
       platform: _nonEmpty(value['platform']),
       logId: _nonEmpty(value['log_id']),
+      fallbacks: _failureFallbacks(value['causes']),
       retryable: value['retryable'] == true,
     );
+
+List<String> _failureFallbacks(Object? value) => (value as List? ?? const [])
+    .whereType<Map>()
+    .map(
+      (cause) => [
+        _nonEmpty(cause['engine']),
+        _nonEmpty(cause['code']),
+        if (_nonEmpty(cause['log_id']) case final logId?) 'log:$logId',
+      ].whereType<String>().join(' / '),
+    )
+    .where((cause) => cause.isNotEmpty)
+    .toList(growable: false);
 
 String? _nonEmpty(Object? value) {
   final text = value is String ? value.trim() : '';

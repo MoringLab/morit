@@ -69,6 +69,10 @@ void main() {
     expect(restored.backendStage, 'merging');
     expect(restored.backendEngine, 'yt-dlp');
     expect(restored.backendAssetId, 'asset-1');
+    expect(restored.deleted, isFalse);
+
+    final deleted = download()..deleted = true;
+    expect(DownloadEntry.fromJson(deleted.toJson()).deleted, isTrue);
   });
 
   test('DownloadEntry remote JSON excludes device-only fields', () {
@@ -91,11 +95,23 @@ void main() {
       'backend_engine',
       'backend_asset_id',
       'dirty',
+      'deleted',
     ]) {
       expect(remote, isNot(contains(key)), reason: '$key must stay local');
     }
     expect(remote['quality'], '1080p');
     expect(DownloadEntry.fromJson(remote, remote: true).deviceOwned, isFalse);
+  });
+
+  test('an active server handoff is not treated as a detached download', () {
+    final entry = download()
+      ..state = 'queued'
+      ..nativeId = null
+      ..backendJobId = null
+      ..deviceOwned = true;
+
+    expect(isDetachedDownload(entry, hasActiveAttempt: true), isFalse);
+    expect(isDetachedDownload(entry, hasActiveAttempt: false), isTrue);
   });
 
   test('download reason messages cover pending, paused and failures', () {

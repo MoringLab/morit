@@ -47,6 +47,7 @@ RFC1918, link-local 및 클라우드 metadata 대역으로 나가지 못하게 �
 - `MAX_FILE_BYTES`(기본 2 GiB), `VALIDATION_TIMEOUT_SECONDS`(기본 600)
 - `ANALYSIS_TTL_SECONDS`(기본 900), `FILE_TTL_SECONDS`(기본 604800/7일)
 - `YT_DLP_JS_RUNTIME`: `deno`(기본), `node`, `quickjs`
+- `YT_DLP_FORCE_IPV6=true`: IPv6가 구성된 배포에서 YouTube yt-dlp 연결을 IPv6로 강제
 - `DEV_AUTH_BYPASS=true`: 로컬 테스트 전용. 이때도 `Bearer dev-local`이 필요함
 
 `DEV_AUTH_BYPASS`는 운영에서 절대 활성화하지 않습니다. Supabase의 service-role

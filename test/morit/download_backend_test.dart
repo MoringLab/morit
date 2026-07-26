@@ -50,10 +50,18 @@ void main() {
         'engine': 'yt-dlp',
         'platform': 'instagram',
         'log_id': 'abc123',
+        'causes': [
+          {
+            'code': 'ENGINE_FAILED',
+            'engine': 'cobalt',
+            'log_id': 'fallback456',
+          },
+        ],
       },
     });
 
     expect(job.error?.displayMessage, contains('log:abc123'));
+    expect(job.error?.displayMessage, contains('log:fallback456'));
   });
 
   test('unknown or zero file sizes stay unknown instead of becoming 0B', () {

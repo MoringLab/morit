@@ -177,6 +177,16 @@ bool isDownloadStartStalled({
     (now ?? DateTime.now().toUtc()).difference(lastModified.toUtc()) >=
         downloadStartTimeout;
 
+bool isDetachedDownload(
+  DownloadEntry entry, {
+  required bool hasActiveAttempt,
+}) =>
+    entry.deviceOwned &&
+    !hasActiveAttempt &&
+    entry.nativeId == null &&
+    entry.backendJobId == null &&
+    {'queued', 'running'}.contains(entry.state);
+
 String backendFailureMessage(DownloadBackendException error) {
   return error.displayMessage;
 }
@@ -285,6 +295,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   List<MoritItem> get visibleItems =>
       items.where((item) => !item.deleted).toList()
         ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+  List<DownloadEntry> get visibleDownloads =>
+      downloads.where((entry) => !entry.deleted).toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
   List<MoritAttachment> attachmentsForItem(String itemId) =>
       attachments
           .where(
@@ -498,7 +511,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
           DownloadEntry.fromJson,
         ),
         (value) => value.id,
-        (value) => value.dirty,
+        (value) =>
+            value.dirty ||
+            value.deleted ||
+            _downloadAttempts.containsKey(value.id),
         (value) => value.updatedAt,
       );
       _normalizeDetachedDownloads();
@@ -657,7 +673,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       attachments.any(
         (value) => value.uploadState != AttachmentUploadState.uploaded,
       ) ||
-      downloads.any((value) => value.dirty);
+      downloads.any((value) => value.dirty || value.deleted);
 
   void finishSignOut() {
     _signingOut = false;
@@ -992,10 +1008,11 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final now = DateTime.now().toUtc();
     for (final entry in downloads.where(
       (value) =>
-          value.deviceOwned &&
-          value.nativeId == null &&
-          value.backendJobId == null &&
-          {'queued', 'running'}.contains(value.state),
+          !value.deleted &&
+          isDetachedDownload(
+            value,
+            hasActiveAttempt: _downloadAttempts.containsKey(value.id),
+          ),
     )) {
       entry.state = 'failed';
       entry.error = '이 기기의 다운로드 작업 정보가 없어 다시 시도해야 합니다.';
@@ -1350,7 +1367,9 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
           notifyListeners();
         }
       }
-      final dirtyDownloads = downloads.where((value) => value.dirty).toList();
+      final dirtyDownloads = downloads
+          .where((value) => value.dirty && !value.deleted)
+          .toList();
       final downloadVersions = {
         for (final value in dirtyDownloads) value.id: value.updatedAt,
       };
@@ -1365,6 +1384,18 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
             value.dirty = false;
           }
         }
+      }
+      for (final entry in List<DownloadEntry>.from(
+        downloads.where((value) => value.deleted),
+      )) {
+        await supabase
+            .schema('morit')
+            .from('downloads')
+            .delete()
+            .eq('id', entry.id)
+            .eq('user_id', userId);
+        if (!active()) return;
+        downloads.removeWhere((value) => value.id == entry.id && value.deleted);
       }
       for (final item in List<MoritItem>.from(
         items.where((value) => value.deleted),
@@ -1576,7 +1607,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         downloads,
         remoteDownloads,
         (value) => value.id,
-        (value) => value.dirty,
+        (value) =>
+            value.dirty ||
+            value.deleted ||
+            _downloadAttempts.containsKey(value.id),
       );
       _normalizeDetachedDownloads();
       _normalizeLegacyMediaSources();
@@ -2808,7 +2842,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     if (jobId != null &&
         !entry.nativeBackendTransferOwned &&
         {'queued', 'running'}.contains(entry.state)) {
-      await _waitForBackendDeviceQueue(entry.id, jobId);
+      unawaited(_waitForBackendDeviceQueue(entry.id, jobId));
     }
   }
 
@@ -3145,6 +3179,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final pendingBackend = downloads
         .where(
           (value) =>
+              !value.deleted &&
               value.backendJobId != null &&
               value.nativeId == null &&
               {'queued', 'running'}.contains(value.state),
@@ -3154,6 +3189,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final pendingNative = downloads
         .where(
           (value) =>
+              !value.deleted &&
               value.nativeId != null &&
               {'queued', 'running', 'paused'}.contains(value.state),
         )
@@ -3490,6 +3526,35 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     entry.updatedAt = DateTime.now().toUtc();
     entry.dirty = true;
     await _changed(syncTodayNotification: false);
+  }
+
+  Future<int> deleteDownloadRecords(Iterable<DownloadEntry> entries) async {
+    final ids = entries.map((value) => value.id).toSet();
+    if (ids.isEmpty) return 0;
+    final deleting = downloads
+        .where(
+          (value) =>
+              ids.contains(value.id) &&
+              !value.deleted &&
+              {'completed', 'failed', 'canceled'}.contains(value.state),
+        )
+        .toList();
+    if (deleting.isEmpty) {
+      showMessage('진행 중인 다운로드는 취소한 뒤 기록을 삭제할 수 있어요.');
+      return 0;
+    }
+    final now = DateTime.now().toUtc();
+    for (final entry in deleting) {
+      entry
+        ..deleted = true
+        ..dirty = false
+        ..updatedAt = now;
+    }
+    await _changed(forceSync: true, syncTodayNotification: false);
+    if (deleting.length != ids.length) {
+      showMessage('진행 중인 다운로드를 제외하고 기록을 삭제했어요.');
+    }
+    return deleting.length;
   }
 
   Future<void> pauseDownload(DownloadEntry entry) async {

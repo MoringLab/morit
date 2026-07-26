@@ -260,6 +260,7 @@ class DownloadEntry {
     this.backendEngine,
     this.backendAssetId,
     this.dirty = true,
+    this.deleted = false,
   });
 
   final String id;
@@ -289,6 +290,7 @@ class DownloadEntry {
   DateTime createdAt;
   DateTime updatedAt;
   bool dirty;
+  bool deleted;
 
   factory DownloadEntry.fromJson(
     Map<String, dynamic> json, {
@@ -328,6 +330,7 @@ class DownloadEntry {
     createdAt: DateTime.parse(json['created_at'] as String),
     updatedAt: DateTime.parse(json['updated_at'] as String),
     dirty: remote ? false : json['dirty'] as bool? ?? false,
+    deleted: remote ? false : json['deleted'] as bool? ?? false,
   );
 
   Map<String, dynamic> toRemote() => {
@@ -363,5 +366,6 @@ class DownloadEntry {
     'backend_engine': backendEngine,
     'backend_asset_id': backendAssetId,
     'dirty': dirty,
+    'deleted': deleted,
   };
 }

@@ -293,23 +293,9 @@ class _PinGateState extends State<_PinGate> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Morit PIN 확인',
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: '이전',
-                    onPressed: widget.onClose,
-                    icon: const Icon(Icons.arrow_back_rounded),
-                  ),
-                ],
+              const Text(
+                'Morit PIN 확인',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
               ),
               const SizedBox(height: 6),
               const Text(
@@ -720,11 +706,6 @@ class _TodayListPanelState extends State<TodayListPanel> {
                 children: [
                   Row(
                     children: [
-                      IconButton(
-                        tooltip: '이전',
-                        onPressed: widget.onClose,
-                        icon: const Icon(Icons.arrow_back_rounded),
-                      ),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
