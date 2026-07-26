@@ -35,7 +35,32 @@ void main() {
     },
   );
 
-  test('every candidate can be selected independently or all at once', () {
+  test('one failed preparation does not skip the remaining files', () async {
+    final candidates = List.generate(
+      5,
+      (index) => MediaCandidate(
+        url: Uri.parse('https://download.example/$index'),
+        kind: MediaKind.image,
+        fileName: '$index.jpg',
+        providerLabel: 'test',
+      ),
+    );
+    final attempted = <String>[];
+
+    await expectLater(
+      startMediaDownloads(candidates, (candidate) async {
+        attempted.add(candidate.fileName);
+        if (candidate.fileName == '1.jpg') throw StateError('failed');
+      }),
+      throwsStateError,
+    );
+    expect(
+      attempted.toSet(),
+      candidates.map((value) => value.fileName).toSet(),
+    );
+  });
+
+  test('every media asset can be selected independently', () {
     MediaCandidate candidate(
       String path,
       MediaKind kind, {
@@ -65,12 +90,9 @@ void main() {
 
     selected = toggleMediaSelection(candidates, selected, video);
     expect(selected, {first.url, preview.url});
-
-    selected = toggleAllMedia(candidates, selected);
-    expect(selected, {first.url, second.url, video.url});
   });
 
-  test('only one quality is selected for each backend asset', () {
+  test('qualities are grouped and only one is selected per asset', () {
     MediaCandidate quality(String id, {bool recommended = false}) =>
         MediaCandidate(
           url: Uri.parse('https://api.example.com/selections/$id'),
@@ -83,13 +105,22 @@ void main() {
 
     final low = quality('720p');
     final high = quality('1080p', recommended: true);
-    final candidates = [low, high];
+    final audio = MediaCandidate(
+      url: Uri.parse('https://api.example.com/selections/audio'),
+      kind: MediaKind.audio,
+      fileName: 'audio.m4a',
+      providerLabel: 'Test',
+      assetId: 'video-1',
+    );
+    final candidates = [low, high, audio];
+    expect(mediaCandidateGroups(candidates), [
+      [low, high],
+      [audio],
+    ]);
     var selected = initialMediaSelection(candidates);
-    expect(selected, {high.url});
+    expect(selected, {high.url, audio.url});
 
     selected = toggleMediaSelection(candidates, selected, low);
-    expect(selected, {low.url});
-    expect(allMediaAssetsSelected(candidates, selected), isTrue);
-    expect(toggleAllMedia(candidates, selected), isEmpty);
+    expect(selected, {low.url, audio.url});
   });
 }

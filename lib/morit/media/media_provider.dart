@@ -29,6 +29,7 @@ final class MediaCandidate {
     this.assetId,
     this.qualityLabel,
     this.sizeBytes,
+    this.sizeEstimated = false,
     this.recommended = false,
   });
 
@@ -44,6 +45,7 @@ final class MediaCandidate {
   final String? assetId;
   final String? qualityLabel;
   final int? sizeBytes;
+  final bool sizeEstimated;
   final bool recommended;
 
   bool get isBackendSelection =>
@@ -130,7 +132,7 @@ const defaultMediaPlatforms = <MediaPlatformDescriptor>[
     id: 'threads',
     label: 'Threads',
     hosts: ['threads.com', 'threads.net'],
-    postPathPatterns: [r'^/@[^/]+/post/[^/]+/?$'],
+    postPathPatterns: [r'^/@[^/]+/post/[^/]+/?$', r'^/t/[^/]+/?$'],
     accessNote: '비공개 계정 게시물은 분석할 수 없습니다.',
   ),
   MediaPlatformDescriptor(

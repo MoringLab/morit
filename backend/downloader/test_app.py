@@ -16,18 +16,23 @@ from fastapi.testclient import TestClient
 
 import app as backend
 from app import (
+    Analysis,
     Job,
     Selection,
     _build_ytdlp_selections,
+    _cached_analysis,
     _compose_cobalt_url,
     _instagram_image_urls,
     _instagram_original_image_url,
+    _map_engine_failure,
     _persist_completed_job,
+    _remote_size_from_headers,
     _restore_completed_jobs,
     _safe_remote_url,
     _validate_cobalt_api_url,
     _validate_media,
     _validate_url_shape,
+    _ytdlp_platform_args,
     app,
     analyses,
     jobs,
@@ -86,10 +91,51 @@ def main() -> None:
     finally:
         backend.COBALT_API_URL = cobalt_url
 
+    assert _ytdlp_platform_args("youtube") == [
+        "--extractor-args",
+        "youtube:player_client=android_vr",
+    ]
+    assert _ytdlp_platform_args("instagram") == []
+    force_ipv6 = backend.YT_DLP_FORCE_IPV6
+    try:
+        backend.YT_DLP_FORCE_IPV6 = True
+        assert _ytdlp_platform_args("youtube") == [
+            "--extractor-args",
+            "youtube:player_client=android_vr",
+            "--force-ipv6",
+        ]
+        assert _ytdlp_platform_args("instagram") == []
+    finally:
+        backend.YT_DLP_FORCE_IPV6 = force_ipv6
+
+    assert _remote_size_from_headers(
+        {"estimated-content-length": "32895859"}
+    ) == (32895859, True)
+    assert _remote_size_from_headers(
+        {"content-range": "bytes 0-0/11829048", "content-length": "1"}
+    ) == (11829048, False)
+    assert _map_engine_failure(
+        "error.api.youtube.login", engine="cobalt", platform="youtube"
+    ).code == "YOUTUBE_BOT_CHECK"
+    bot_check = _map_engine_failure(
+        "ERROR: Sign in to confirm you’re not a bot. Use --cookies",
+        engine="yt-dlp",
+        platform="youtube",
+    )
+    assert bot_check.code == "YOUTUBE_BOT_CHECK"
+    assert bot_check.retryable is True
+    assert _map_engine_failure(
+        "error.api.link.invalid", engine="cobalt", platform="threads"
+    ).code == "UNSUPPORTED_URL"
+    assert _map_engine_failure(
+        "error.api.fetch.empty", engine="cobalt", platform="instagram"
+    ).code == "MEDIA_NOT_FOUND"
+
     video_info = {
         "id": "one",
         "title": "sample",
         "extractor_key": "Youtube",
+        "duration": 120,
         "formats": [
             {
                 "format_id": "137",
@@ -124,6 +170,21 @@ def main() -> None:
     assert len({item.asset_id for item in variants}) == 1
     assert sum(item.recommended for item in variants) == 1
     assert all(item.format_selector for item in variants)
+    assert all(item.size_bytes for item in variants)
+    assert all(item.size_estimated for item in variants)
+    cached = Analysis(
+        id="cached-analysis",
+        user_id="cache-user",
+        source_url="https://youtube.com/watch?v=one",
+        provider="youtube",
+        title="sample",
+        thumbnail_url=None,
+        selections={item.id: item for item in variants},
+    )
+    analyses[cached.id] = cached
+    assert _cached_analysis(cached.user_id, cached.source_url) is cached
+    assert _cached_analysis("another-user", cached.source_url) is None
+    analyses.clear()
 
     gallery_info = {
         "id": "gallery",

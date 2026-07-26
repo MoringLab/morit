@@ -249,6 +249,7 @@ class DownloadEntry {
     this.saveLocation,
     this.fileName,
     this.mimeType,
+    this.sizeBytes,
     this.description,
     this.error,
     this.wifiOnly = false,
@@ -259,6 +260,7 @@ class DownloadEntry {
     this.backendEngine,
     this.backendAssetId,
     this.dirty = true,
+    this.deleted = false,
   });
 
   final String id;
@@ -275,6 +277,7 @@ class DownloadEntry {
   String? saveLocation;
   String? fileName;
   String? mimeType;
+  int? sizeBytes;
   String? description;
   String? error;
   bool wifiOnly;
@@ -287,6 +290,7 @@ class DownloadEntry {
   DateTime createdAt;
   DateTime updatedAt;
   bool dirty;
+  bool deleted;
 
   factory DownloadEntry.fromJson(
     Map<String, dynamic> json, {
@@ -306,6 +310,7 @@ class DownloadEntry {
     saveLocation: remote ? null : json['save_location'] as String?,
     fileName: remote ? null : json['file_name'] as String?,
     mimeType: remote ? null : json['mime_type'] as String?,
+    sizeBytes: remote ? null : (json['size_bytes'] as num?)?.toInt(),
     description: remote ? null : json['description'] as String?,
     error: json['error'] as String?,
     wifiOnly: remote ? false : json['wifi_only'] as bool? ?? false,
@@ -325,6 +330,7 @@ class DownloadEntry {
     createdAt: DateTime.parse(json['created_at'] as String),
     updatedAt: DateTime.parse(json['updated_at'] as String),
     dirty: remote ? false : json['dirty'] as bool? ?? false,
+    deleted: remote ? false : json['deleted'] as bool? ?? false,
   );
 
   Map<String, dynamic> toRemote() => {
@@ -350,6 +356,7 @@ class DownloadEntry {
     'save_location': saveLocation,
     'file_name': fileName,
     'mime_type': mimeType,
+    'size_bytes': sizeBytes,
     'description': description,
     'wifi_only': wifiOnly,
     'device_owned': deviceOwned,
@@ -359,5 +366,6 @@ class DownloadEntry {
     'backend_engine': backendEngine,
     'backend_asset_id': backendAssetId,
     'dirty': dirty,
+    'deleted': deleted,
   };
 }

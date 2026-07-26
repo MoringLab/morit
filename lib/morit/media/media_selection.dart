@@ -4,18 +4,38 @@ Future<void> startMediaDownloads(
   List<MediaCandidate> candidates,
   Future<void> Function(MediaCandidate) start,
 ) async {
+  Object? firstError;
+  StackTrace? firstStack;
   for (var offset = 0; offset < candidates.length; offset += 2) {
-    await Future.wait(candidates.skip(offset).take(2).map(start));
+    await Future.wait(
+      candidates.skip(offset).take(2).map((candidate) async {
+        try {
+          await start(candidate);
+        } on Object catch (error, stack) {
+          firstError ??= error;
+          firstStack ??= stack;
+        }
+      }),
+    );
   }
+  if (firstError != null) Error.throwWithStackTrace(firstError!, firstStack!);
 }
 
-Set<Uri> initialMediaSelection(List<MediaCandidate> candidates) {
+List<List<MediaCandidate>> mediaCandidateGroups(
+  List<MediaCandidate> candidates,
+) {
   final byAsset = <String, List<MediaCandidate>>{};
   for (final candidate in candidates.where((value) => !value.isPreview)) {
     byAsset.putIfAbsent(_assetKey(candidate), () => []).add(candidate);
   }
+  return List<List<MediaCandidate>>.unmodifiable(
+    byAsset.values.map((values) => List<MediaCandidate>.unmodifiable(values)),
+  );
+}
+
+Set<Uri> initialMediaSelection(List<MediaCandidate> candidates) {
   return Set.unmodifiable({
-    for (final values in byAsset.values)
+    for (final values in mediaCandidateGroups(candidates))
       (values.where((value) => value.recommended).firstOrNull ?? values.first)
           .url,
   });
@@ -34,7 +54,10 @@ Set<Uri> toggleMediaSelection(
     next.removeAll(
       candidates
           .where(
-            (value) => value.assetId == assetId && value.url != candidate.url,
+            (value) =>
+                value.assetId == assetId &&
+                value.kind == candidate.kind &&
+                value.url != candidate.url,
           )
           .map((value) => value.url),
     );
@@ -42,35 +65,9 @@ Set<Uri> toggleMediaSelection(
   return Set.unmodifiable(next);
 }
 
-Set<Uri> toggleAllMedia(
-  List<MediaCandidate> candidates,
-  Set<Uri> selectedUrls,
-) {
-  final all = initialMediaSelection(candidates);
-  if (all.isEmpty) return Set.unmodifiable(selectedUrls);
-  return allMediaAssetsSelected(candidates, selectedUrls)
-      ? const {}
-      : Set.unmodifiable(all);
-}
-
-bool allMediaAssetsSelected(
-  List<MediaCandidate> candidates,
-  Set<Uri> selectedUrls,
-) {
-  final availableAssets = candidates
-      .where((value) => !value.isPreview)
-      .map(_assetKey)
-      .toSet();
-  final selectedAssets = selectedMediaCandidates(
-    candidates,
-    selectedUrls,
-  ).where((value) => !value.isPreview).map(_assetKey).toSet();
-  return availableAssets.isNotEmpty &&
-      selectedAssets.containsAll(availableAssets);
-}
-
-String _assetKey(MediaCandidate candidate) =>
-    candidate.assetId ?? candidate.url.toString();
+String _assetKey(MediaCandidate candidate) => candidate.assetId == null
+    ? candidate.url.toString()
+    : '${candidate.assetId}:${candidate.kind.name}';
 
 List<MediaCandidate> selectedMediaCandidates(
   List<MediaCandidate> candidates,

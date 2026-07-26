@@ -1,13 +1,16 @@
 file=morit-release.apk
 version=1.5.0+8
-sha256=927DD3C1972692D0D080DA337F90AE86F4DBF351FCE05BB5AD19E915212DA487
-bytes=59382186
-built_at=2026-07-25T16:18:24+09:00
+sha256=D27A587A60922EE3774E32B324B339920728CE02369B2FE3202414AFEBB69756
+bytes=59611426
+built_at=2026-07-26T21:21:51+09:00
 build=flutter build apk --release --dart-define-from-file=config/local.json
-download_api_url_configured=false
+download_api_url_configured=true
 certificate_sha256=5d05f33304d12e06ee8fc42cc366672e0d972c3b2e2c25042ff257e811ab7ef2
 signatures=v2,v3
-verified_on=Android 17 emulator (API 37)
-verification=flutter_analyze;flutter_test_60_of_60;backend_pycompile;backend_test_app;docker_compose_config;docker_image_build;android_unit_5_of_5;compileDebugKotlin;release_install;cold_launch
-apk_secret_scan=sb_secret_0;service_role_jwt_0;private_keys_0;sensitive_zip_entries_0;anon_jwt_1
-limitation=installable backend-ready build; media analysis/download requires a deployed HTTPS DOWNLOAD_API_URL
+verified_on=Android 17 emulator (API 37; no physical device connected)
+verification=flutter_analyze;flutter_test_66_of_66;release_build;apk_signature_v2_v3;release_install;cold_launch
+fix=share_download_overlay_released_after_background_handoff
+server_youtube=reference_yt_dlp_8.710s_11_selections;reference_cobalt_3.505s_1_selection;two_public_urls_youtube_bot_check_on_both_engines
+server_youtube_download=yt_dlp_360p_8.908s_11829048_bytes_video_mp4_h264_aac_ffprobe_ok
+apk_secret_scan=sb_secret_0;service_role_jwt_0;private_keys_0;sensitive_zip_entries_0;anon_jwt_duplicates_3
+limitation=Oracle Always Free E2 Micro backend; Oracle egress bot verification still blocks some public YouTube links; authenticated physical-device E2E not run

@@ -1,12 +1,17 @@
 package com.luverse.morit
 
 import android.app.DownloadManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
 import android.app.job.JobService
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
 import org.json.JSONObject
@@ -26,6 +31,7 @@ private const val STATUS_CONNECT_TIMEOUT_MILLIS = 15_000
 private const val STATUS_READ_TIMEOUT_MILLIS = 20_000
 private const val MAX_STATUS_RESPONSE_BYTES = 1024 * 1024
 private const val MIN_BACKOFF_MILLIS = 10_000L
+private const val DOWNLOAD_PREPARATION_CHANNEL_ID = "download_preparation"
 
 private val backendJobIdPattern = Regex("""^[A-Za-z0-9_-]{8,100}$""")
 private val opaqueTicketPattern = Regex("""[A-Za-z0-9_-]{43,}""")
@@ -180,6 +186,8 @@ internal object BackendTransferScheduler {
                     .putString(key(jobId, "error"), "Android could not schedule the transfer.")
                     .putLong(key(jobId, "updated_at"), System.currentTimeMillis())
                     .commit()
+            } else {
+                updateNotification(appContext, jobId)
             }
             return scheduled
         }
@@ -269,6 +277,7 @@ internal object BackendTransferScheduler {
             if (nativeId != null) {
                 appContext.getSystemService(DownloadManager::class.java).remove(nativeId)
             }
+            cancelNotification(appContext, jobId)
             return true
         }
     }
@@ -309,6 +318,86 @@ internal object BackendTransferScheduler {
         val status = preferences(context.applicationContext).string(backendJobId, "status")
         return status !in setOf("complete", "canceled", "failed", "device_queued")
     }
+
+    fun updateNotification(context: Context, backendJobId: String) {
+        val state = query(context, backendJobId)
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (state == null ||
+            state["nativeId"] != null ||
+            state["status"] in setOf("complete", "canceled", "failed", "device_queued")
+        ) {
+            cancelNotification(context, backendJobId)
+            return
+        }
+        if (!manager.areNotificationsEnabled()) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    DOWNLOAD_PREPARATION_CHANNEL_ID,
+                    "다운로드 진행",
+                    NotificationManager.IMPORTANCE_LOW,
+                ).apply {
+                    description = "백그라운드 미디어 준비와 다운로드 진행 상태"
+                    lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+                },
+            )
+        }
+        val preferences = preferences(context)
+        val progress = (state["progress"] as? Int ?: 0).coerceIn(0, 100)
+        val remaining = preferences.all.count { (key, value) ->
+            key.startsWith(TRANSFER_PREFIX) &&
+                key.endsWith(".status") &&
+                value is String &&
+                value !in setOf("complete", "canceled", "failed", "device_queued")
+        }
+        val stage = when (state["stage"]) {
+            "downloading" -> "원본 다운로드 중"
+            "processing", "merging", "converting" -> "미디어 처리 중"
+            "verifying", "validating" -> "파일 확인 중"
+            else -> "다운로드 준비 중"
+        }
+        val contentIntent = PendingIntent.getActivity(
+            context,
+            backendTransferSchedulerId(backendJobId),
+            Intent(context, MainActivity::class.java)
+                .setAction("${context.packageName}.OPEN_DOWNLOADS")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(context, DOWNLOAD_PREPARATION_CHANNEL_ID)
+        } else {
+            Notification.Builder(context)
+        }
+        manager.notify(
+            notificationId(backendJobId),
+            builder
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setContentTitle(preferences.string(backendJobId, "title") ?: "Morit 다운로드")
+                .setContentText(
+                    listOfNotNull(
+                        stage,
+                        progress.takeIf { it > 0 }?.let { "$it%" },
+                        remaining.takeIf { it > 1 }?.let { "남은 작업 ${it}개" },
+                    ).joinToString(" · "),
+                )
+                .setProgress(100, progress, progress <= 0)
+                .setContentIntent(contentIntent)
+                .setOnlyAlertOnce(true)
+                .setOngoing(true)
+                .setCategory(Notification.CATEGORY_PROGRESS)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
+                .build(),
+        )
+    }
+
+    fun cancelNotification(context: Context, backendJobId: String) {
+        context.getSystemService(NotificationManager::class.java)
+            .cancel(notificationId(backendJobId))
+    }
+
+    private fun notificationId(backendJobId: String): Int =
+        backendTransferSchedulerId(backendJobId) xor 0x2D0A0000
 
     fun poll(
         context: Context,
@@ -529,12 +618,25 @@ class BackendTransferJobService : JobService() {
             generations[params.jobId] = generation
         }
         executor.execute {
+            fun active(): Boolean = synchronized(generationLock) {
+                generations[params.jobId] === generation
+            }
             val retry = try {
-                BackendTransferScheduler.poll(this, backendJobId) {
-                    synchronized(generationLock) {
-                        generations[params.jobId] === generation
-                    }
+                var polls = 0
+                while (active() && BackendTransferScheduler.shouldRetry(this, backendJobId)) {
+                    val keepPolling = BackendTransferScheduler.poll(
+                        this,
+                        backendJobId,
+                        ::active,
+                    )
+                    BackendTransferScheduler.updateNotification(this, backendJobId)
+                    if (!keepPolling) break
+                    polls += 1
+                    Thread.sleep(if (polls < 3) 750L else 2_000L)
                 }
+                !active() && BackendTransferScheduler.shouldRetry(this, backendJobId)
+            } catch (_: InterruptedException) {
+                BackendTransferScheduler.shouldRetry(this, backendJobId)
             } catch (_: Exception) {
                 BackendTransferScheduler.shouldRetry(this, backendJobId)
             }

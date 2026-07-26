@@ -60,6 +60,7 @@ VALIDATION_TIMEOUT_SECONDS = int(os.getenv("VALIDATION_TIMEOUT_SECONDS", "600"))
 YT_DLP_JS_RUNTIME = os.getenv("YT_DLP_JS_RUNTIME", "deno").lower()
 if YT_DLP_JS_RUNTIME not in {"deno", "node", "quickjs"}:
     raise RuntimeError("YT_DLP_JS_RUNTIME must be deno, node, or quickjs")
+YT_DLP_FORCE_IPV6 = os.getenv("YT_DLP_FORCE_IPV6", "").lower() == "true"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_PUBLIC_KEY = (
@@ -148,6 +149,13 @@ ALLOWED_HOSTS = DEFAULT_ALLOWED_HOSTS | {
 IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp", "gif", "avif", "heic"}
 VIDEO_EXTENSIONS = {"mp4", "m4v", "mov", "webm", "mkv", "avi", "ts"}
 AUDIO_EXTENSIONS = {"m4a", "mp3", "aac", "opus", "ogg", "flac", "wav", "mka"}
+COBALT_FIRST_PLATFORMS = {
+    "facebook",
+    "instagram",
+    "threads",
+    "tiktok",
+    "x",
+}
 MIME_BY_EXTENSION = {
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
@@ -200,6 +208,7 @@ class Selection:
     is_preview: bool
     recommended: bool
     engine: str
+    size_estimated: bool = False
     format_selector: str | None = None
     playlist_item: int | None = None
     remote_url: str | None = None
@@ -267,9 +276,10 @@ class EngineFailure(Exception):
         self.retryable = retryable
         self.raw = raw
         self.log_id = uuid.uuid4().hex[:12]
+        self.causes: list[dict[str, Any]] = []
 
     def public(self) -> dict[str, Any]:
-        return {
+        value = {
             "code": self.code,
             "message": self.message,
             "engine": self.engine,
@@ -277,6 +287,9 @@ class EngineFailure(Exception):
             "retryable": self.retryable,
             "log_id": self.log_id,
         }
+        if self.causes:
+            value["causes"] = self.causes
+        return value
 
 
 analyses: dict[str, Analysis] = {}
@@ -485,7 +498,7 @@ def _platform_from_url(url: str) -> str:
         ("instagram", ("instagram.com",)),
         ("soundcloud", ("soundcloud.com",)),
         ("facebook", ("facebook.com", "fb.watch")),
-        ("threads", ("threads.net",)),
+        ("threads", ("threads.com", "threads.net")),
         ("tiktok", ("tiktok.com",)),
         ("bluesky", ("bsky.app", "bluesky.app")),
         ("reddit", ("reddit.com", "redd.it")),
@@ -533,16 +546,26 @@ def _asset_id(root: dict[str, Any], entry: dict[str, Any], index: int) -> str:
     return hashlib.sha256(identity.encode()).hexdigest()[:20]
 
 
-def _size_for_formats(items: list[dict[str, Any]]) -> int | None:
-    values = [
-        item.get("filesize") or item.get("filesize_approx")
-        for item in items
-        if item.get("filesize") or item.get("filesize_approx")
-    ]
+def _size_for_formats(
+    items: list[dict[str, Any]], duration: Any = None
+) -> tuple[int | None, bool]:
     try:
-        return sum(int(value) for value in values)
+        seconds = float(duration or 0)
+        total = 0
+        estimated = False
+        for item in items:
+            value = item.get("filesize") or item.get("filesize_approx")
+            if value:
+                total += int(value)
+                continue
+            bitrate = item.get("tbr") or item.get("abr")
+            if seconds <= 0 or not bitrate:
+                return None, False
+            total += round(float(bitrate) * 1000 * seconds / 8)
+            estimated = True
+        return (total or None), estimated
     except (TypeError, ValueError):
-        return None
+        return None, False
 
 
 def _instagram_original_image_url(value: Any) -> str | None:
@@ -670,6 +693,7 @@ def _build_ytdlp_selections(
                 ),
             )
             extension = str(best.get("ext") or "jpg").lower()
+            size_bytes, size_estimated = _size_for_formats([best])
             selections.append(
                 Selection(
                     id=secrets.token_urlsafe(12),
@@ -682,10 +706,11 @@ def _build_ytdlp_selections(
                     width=int(best.get("width") or 0) or None,
                     height=int(best.get("height") or 0) or None,
                     bitrate=None,
-                    size_bytes=_size_for_formats([best]),
+                    size_bytes=size_bytes,
                     is_preview=False,
                     recommended=True,
                     engine="yt-dlp",
+                    size_estimated=size_estimated,
                     format_selector=str(best.get("format_id") or "best"),
                     playlist_item=playlist_item,
                 )
@@ -733,6 +758,12 @@ def _build_ytdlp_selections(
                     else video_id
                 )
                 label = f"{height}p" if height else "최고 화질"
+                selected_formats = [
+                    item for item in (best_video, best_audio) if item
+                ]
+                size_bytes, size_estimated = _size_for_formats(
+                    selected_formats, entry.get("duration")
+                )
                 selections.append(
                     Selection(
                         id=secrets.token_urlsafe(12),
@@ -745,12 +776,11 @@ def _build_ytdlp_selections(
                         width=int(best_video.get("width") or 0) or None,
                         height=int(best_video.get("height") or 0) or None,
                         bitrate=int(best_video.get("tbr") or 0) or None,
-                        size_bytes=_size_for_formats(
-                            [item for item in (best_video, best_audio) if item]
-                        ),
+                        size_bytes=size_bytes,
                         is_preview=False,
                         recommended=quality_index == 0,
                         engine="yt-dlp",
+                        size_estimated=size_estimated,
                         format_selector=selector,
                         playlist_item=playlist_item,
                     )
@@ -780,6 +810,9 @@ def _build_ytdlp_selections(
                 )
                 format_id = str(chosen.get("format_id") or "bestaudio")
                 label = f"오디오 {bitrate} kbps" if bitrate else "오디오"
+                size_bytes, size_estimated = _size_for_formats(
+                    [chosen], entry.get("duration")
+                )
                 selections.append(
                     Selection(
                         id=secrets.token_urlsafe(12),
@@ -792,10 +825,11 @@ def _build_ytdlp_selections(
                         width=None,
                         height=None,
                         bitrate=bitrate or None,
-                        size_bytes=_size_for_formats([chosen]),
+                        size_bytes=size_bytes,
                         is_preview=False,
                         recommended=not video_formats and audio_index == 0,
                         engine="yt-dlp",
+                        size_estimated=size_estimated,
                         format_selector=format_id,
                         playlist_item=playlist_item,
                     )
@@ -901,6 +935,45 @@ def _map_engine_failure(
     raw: str, *, engine: str, platform: str
 ) -> EngineFailure:
     lower = raw.lower()
+    cobalt_codes = {
+        "error.api.youtube.login": (
+            "YOUTUBE_BOT_CHECK",
+            "YouTube가 다운로드 서버의 네트워크에 봇 확인을 요구했습니다.",
+            True,
+        ),
+        "error.api.link.invalid": (
+            "UNSUPPORTED_URL",
+            "이 플랫폼 또는 URL 형식은 현재 Cobalt에서 지원하지 않습니다.",
+            False,
+        ),
+        "error.api.fetch.empty": (
+            "MEDIA_NOT_FOUND",
+            "게시물에서 선택 가능한 원본 미디어를 찾지 못했습니다.",
+            False,
+        ),
+    }
+    if lower in cobalt_codes:
+        code, message, retryable = cobalt_codes[lower]
+        return EngineFailure(
+            code,
+            message,
+            engine=engine,
+            platform=platform,
+            retryable=retryable,
+            raw=raw,
+        )
+    if platform == "youtube" and (
+        "confirm you're not a bot" in lower
+        or "confirm you’re not a bot" in lower
+    ):
+        return EngineFailure(
+            "YOUTUBE_BOT_CHECK",
+            "YouTube가 다운로드 서버의 네트워크에 봇 확인을 요구했습니다.",
+            engine=engine,
+            platform=platform,
+            retryable=True,
+            raw=raw,
+        )
     cases = (
         (("unsupported url", "no suitable extractor"), "UNSUPPORTED_URL", "이 플랫폼 또는 URL 형식은 현재 엔진에서 지원하지 않습니다.", False),
         (("login required", "cookies", "sign in"), "AUTH_REQUIRED", "로그인 또는 세션이 필요한 콘텐츠입니다.", False),
@@ -931,6 +1004,17 @@ def _map_engine_failure(
     )
 
 
+def _ytdlp_platform_args(platform: str) -> list[str]:
+    args = (
+        ["--extractor-args", "youtube:player_client=android_vr"]
+        if platform == "youtube"
+        else []
+    )
+    if YT_DLP_FORCE_IPV6 and platform == "youtube":
+        args.append("--force-ipv6")
+    return args
+
+
 async def _analyze_ytdlp(
     source_url: str,
 ) -> tuple[str, str | None, list[Selection]]:
@@ -946,7 +1030,6 @@ async def _analyze_ytdlp(
         YT_DLP_JS_RUNTIME,
         "--dump-single-json",
         "--skip-download",
-        "--ignore-no-formats-error",
         "--socket-timeout",
         "15",
         "--extractor-retries",
@@ -955,8 +1038,10 @@ async def _analyze_ytdlp(
         "2",
         "--fragment-retries",
         "2",
-        "--no-warnings",
     ]
+    command.extend(_ytdlp_platform_args(platform))
+    if platform == "instagram":
+        command.append("--ignore-no-formats-error")
     if _analyze_as_playlist(source_url):
         command.extend(["--yes-playlist", "--playlist-end", str(MAX_PLAYLIST_ITEMS)])
     else:
@@ -1005,7 +1090,13 @@ async def _analyze_ytdlp(
                 platform=platform,
                 raw=raw_error,
             ) from error
-        return _build_ytdlp_selections(info, source_url)
+        try:
+            result = _build_ytdlp_selections(info, source_url)
+        except EngineFailure as failure:
+            failure.raw = failure.raw or raw_error
+            raise
+        await _fill_remote_sizes(result[2])
+        return result
     finally:
         if process and process.returncode is None:
             await _kill_process_tree(process)
@@ -1177,6 +1268,7 @@ async def _analyze_cobalt(
             platform=platform,
             raw=response.text,
         )
+    await _fill_remote_sizes(selections)
     return platform, None, selections
 
 
@@ -1280,6 +1372,31 @@ def _clean_expired() -> None:
         shutil.rmtree(JOB_DIR / oldest.id, ignore_errors=True)
 
 
+def _cached_analysis(user_id: str, source_url: str) -> Analysis | None:
+    # ponytail: MAX_ANALYSES bounds this scan; add a second index only if profiling
+    # shows these 200 in-memory entries matter next to network extraction.
+    return next(
+        (
+            value
+            for value in reversed(analyses.values())
+            if value.user_id == user_id and value.source_url == source_url
+        ),
+        None,
+    )
+
+
+def _analysis_public(value: Analysis, *, cached: bool) -> dict[str, Any]:
+    return {
+        "analysis_id": value.id,
+        "source_url": value.source_url,
+        "provider": value.provider,
+        "title": value.title,
+        "thumbnail_url": value.thumbnail_url,
+        "selections": [item.public() for item in value.selections.values()],
+        "cached": cached,
+    }
+
+
 def _log_failure(failure: EngineFailure, source_url: str) -> None:
     logger.error(
         "engine_failure log_id=%s engine=%s platform=%s code=%s details=%s",
@@ -1312,6 +1429,20 @@ async def analyze(
     body: AnalyzeBody, user_id: str = Depends(current_user)
 ) -> dict[str, Any]:
     _clean_expired()
+    try:
+        source_url = await validate_source_url(body.url)
+    except ValueError as error:
+        raise HTTPException(
+            400, detail={"code": "UNSAFE_OR_UNSUPPORTED_URL", "message": str(error)}
+        ) from error
+    cached = _cached_analysis(user_id, source_url)
+    if cached:
+        logger.info(
+            "analysis_complete platform=%s cached=true elapsed_ms=0 selections=%s",
+            cached.provider,
+            len(cached.selections),
+        )
+        return _analysis_public(cached, cached=True)
     now = time.time()
     recent = [
         value for value in analysis_history.get(user_id, []) if now - value < 60
@@ -1327,13 +1458,8 @@ async def analyze(
         )
     recent.append(now)
     analysis_history[user_id] = recent
-    try:
-        source_url = await validate_source_url(body.url)
-    except ValueError as error:
-        raise HTTPException(
-            400, detail={"code": "UNSAFE_OR_UNSUPPORTED_URL", "message": str(error)}
-        ) from error
     platform = _platform_from_url(source_url)
+    started = time.perf_counter()
     try:
         try:
             await asyncio.wait_for(analysis_slots.acquire(), 0.05)
@@ -1346,13 +1472,26 @@ async def analyze(
                 },
             ) from error
         try:
+            engines = (
+                (_analyze_cobalt, _analyze_ytdlp)
+                if COBALT_API_URL and platform in COBALT_FIRST_PLATFORMS
+                else (_analyze_ytdlp, _analyze_cobalt)
+            )
             try:
-                title, thumbnail, selections_list = await _analyze_ytdlp(source_url)
+                title, thumbnail, selections_list = await engines[0](source_url)
             except EngineFailure as primary:
-                _log_failure(primary, source_url)
                 if not COBALT_API_URL:
                     raise
-                title, thumbnail, selections_list = await _analyze_cobalt(source_url)
+                try:
+                    title, thumbnail, selections_list = await engines[1](
+                        source_url
+                    )
+                except EngineFailure as fallback:
+                    _log_failure(fallback, source_url)
+                    primary.causes = [fallback.public()]
+                    raise primary
+                else:
+                    _log_failure(primary, source_url)
         finally:
             analysis_slots.release()
     except EngineFailure as failure:
@@ -1370,14 +1509,13 @@ async def analyze(
         selections={item.id: item for item in selections_list},
     )
     analyses[analysis_id] = stored
-    return {
-        "analysis_id": analysis_id,
-        "source_url": source_url,
-        "provider": platform,
-        "title": title,
-        "thumbnail_url": thumbnail,
-        "selections": [item.public() for item in selections_list],
-    }
+    logger.info(
+        "analysis_complete platform=%s cached=false elapsed_ms=%s selections=%s",
+        platform,
+        round((time.perf_counter() - started) * 1000),
+        len(selections_list),
+    )
+    return _analysis_public(stored, cached=False)
 
 
 def _job_public(job: Job, request: Request | None = None) -> dict[str, Any]:
@@ -1565,19 +1703,23 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
-async def _download_instagram_image_once(job: Job, work_dir: Path) -> Path:
-    _, _, refreshed = await _analyze_ytdlp(job.source_url)
-    current = next(
-        (
-            item
-            for item in refreshed
-            if item.engine == "instagram-image"
-            and item.kind == "image"
-            and item.asset_id == job.selection.asset_id
-            and item.playlist_item == job.selection.playlist_item
-        ),
-        None,
-    )
+async def _download_instagram_image_once(
+    job: Job, work_dir: Path, *, refresh: bool
+) -> Path:
+    current = job.selection
+    if refresh or not current.remote_url:
+        _, _, refreshed = await _analyze_ytdlp(job.source_url)
+        current = next(
+            (
+                item
+                for item in refreshed
+                if item.engine == "instagram-image"
+                and item.kind == "image"
+                and item.asset_id == job.selection.asset_id
+                and item.playlist_item == job.selection.playlist_item
+            ),
+            None,
+        )
     url = _instagram_original_image_url(current.remote_url if current else None)
     if not current or not url:
         raise EngineFailure(
@@ -1717,7 +1859,9 @@ async def _download_instagram_image_once(job: Job, work_dir: Path) -> Path:
 async def _download_instagram_image(job: Job, work_dir: Path) -> Path:
     for attempt in range(3):
         try:
-            return await _download_instagram_image_once(job, work_dir)
+            return await _download_instagram_image_once(
+                job, work_dir, refresh=attempt > 0
+            )
         except EngineFailure as failure:
             if not failure.retryable or attempt == 2:
                 raise
@@ -1782,6 +1926,7 @@ async def _download_ytdlp(job: Job, work_dir: Path) -> Path:
         command.extend(["--extract-audio", "--audio-format", "m4a", "--audio-quality", "0"])
     elif selection.kind == "video":
         command.extend(["--merge-output-format", "mp4/mkv/webm"])
+    command.extend(_ytdlp_platform_args(job.platform))
     command.append(job.source_url)
 
     process = await asyncio.create_subprocess_exec(
@@ -1857,25 +2002,80 @@ async def _safe_remote_url(url: str) -> str:
     return normalized
 
 
-async def _download_cobalt(job: Job, work_dir: Path) -> Path:
-    _, _, refreshed = await _analyze_cobalt(
-        job.source_url, _cobalt_video_quality(job.selection.label)
-    )
-    current = next(
-        (
-            item
-            for item in refreshed
-            if item.kind == job.selection.kind
-            and (
-                item.asset_id == job.selection.asset_id
-                or (
-                    job.selection.playlist_item is not None
-                    and item.playlist_item == job.selection.playlist_item
+def _remote_size_from_headers(headers: Any) -> tuple[int | None, bool]:
+    range_match = re.search(r"/(\d+)$", headers.get("content-range", ""))
+    if range_match:
+        return _to_int(range_match.group(1)), False
+    estimated = _to_int(headers.get("estimated-content-length"))
+    if estimated:
+        return estimated, True
+    return _to_int(headers.get("content-length")), False
+
+
+async def _fill_remote_sizes(selections: list[Selection]) -> None:
+    # ponytail: cap probes to keep analysis interactive; raise this only if
+    # real-world posts routinely contain more than 16 downloadable assets.
+    pending = [
+        item
+        for item in selections
+        if item.size_bytes is None and item.remote_url
+    ][:16]
+    if not pending:
+        return
+    slots = asyncio.Semaphore(6)
+    timeout = httpx.Timeout(5)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+
+        async def probe(item: Selection) -> None:
+            try:
+                async with slots:
+                    url = await _safe_remote_url(item.remote_url or "")
+                    headers = {
+                        "Accept-Encoding": "identity",
+                        "Range": "bytes=0-0",
+                    }
+                    if COBALT_API_KEY and _same_origin(url, COBALT_API_URL):
+                        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+                    async with client.stream(
+                        "GET", url, headers=headers
+                    ) as response:
+                        if not response.is_success:
+                            return
+                        size, estimated = _remote_size_from_headers(
+                            response.headers
+                        )
+                        if size and 0 < size <= MAX_FILE_BYTES:
+                            item.size_bytes = size
+                            item.size_estimated = estimated
+            except (EngineFailure, httpx.HTTPError):
+                return
+
+        await asyncio.gather(*(probe(item) for item in pending))
+
+
+async def _download_cobalt(
+    job: Job, work_dir: Path, *, refresh: bool = False
+) -> Path:
+    current = job.selection
+    if refresh or not current.remote_url:
+        _, _, refreshed = await _analyze_cobalt(
+            job.source_url, _cobalt_video_quality(job.selection.label)
+        )
+        current = next(
+            (
+                item
+                for item in refreshed
+                if item.kind == job.selection.kind
+                and (
+                    item.asset_id == job.selection.asset_id
+                    or (
+                        job.selection.playlist_item is not None
+                        and item.playlist_item == job.selection.playlist_item
+                    )
                 )
-            )
-        ),
-        None,
-    )
+            ),
+            None,
+        )
     if current is None or not current.remote_url:
         raise EngineFailure(
             "COBALT_SELECTION_EXPIRED",
@@ -2009,9 +2209,20 @@ async def _download_cobalt(job: Job, work_dir: Path) -> Path:
 
 
 async def _download_cobalt_bounded(job: Job, work_dir: Path) -> Path:
+    async def download() -> Path:
+        for attempt in range(2):
+            try:
+                return await _download_cobalt(job, work_dir, refresh=attempt > 0)
+            except EngineFailure as failure:
+                if not failure.retryable or attempt:
+                    raise
+                for partial in work_dir.glob("media.*"):
+                    partial.unlink(missing_ok=True)
+        raise AssertionError("unreachable")
+
     try:
         return await asyncio.wait_for(
-            _download_cobalt(job, work_dir), DOWNLOAD_TIMEOUT_SECONDS
+            download(), DOWNLOAD_TIMEOUT_SECONDS
         )
     except TimeoutError as error:
         raise EngineFailure(
@@ -2115,6 +2326,8 @@ async def _decode_check(path: Path) -> None:
         "0:v:0?",
         "-map",
         "0:a:0?",
+        "-c",
+        "copy",
         "-f",
         "null",
         "-",
@@ -2279,6 +2492,7 @@ async def _run_job(job: Job) -> None:
     ready = root / "ready"
     work.mkdir(parents=True, exist_ok=True)
     ready.mkdir()
+    started = time.perf_counter()
     try:
         async with job_slots:
             if job.cancel_requested:
@@ -2361,6 +2575,14 @@ async def _run_job(job: Job) -> None:
         job.process = None
         if job.finished_at is None:
             job.finished_at = time.time()
+        logger.info(
+            "job_complete platform=%s engine=%s status=%s elapsed_ms=%s bytes=%s",
+            job.platform,
+            job.selection.engine,
+            job.status,
+            round((time.perf_counter() - started) * 1000),
+            job.content_length or 0,
+        )
 
 
 @app.api_route("/v1/files/{job_id}", methods=["GET", "HEAD"])

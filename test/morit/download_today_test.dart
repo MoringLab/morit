@@ -23,6 +23,7 @@ void main() {
     saveLocation: 'Movies/Morit',
     fileName: 'video.mp4',
     mimeType: 'video/mp4',
+    sizeBytes: 1048576,
     description: '나중에 보기',
     wifiOnly: true,
     backendJobId: 'job-1',
@@ -55,6 +56,7 @@ void main() {
 
     expect(restored.fileName, 'video.mp4');
     expect(restored.mimeType, 'video/mp4');
+    expect(restored.sizeBytes, 1048576);
     expect(restored.description, '나중에 보기');
     expect(restored.deviceOwned, isTrue);
     expect(restored.nativeId, 73);
@@ -67,6 +69,10 @@ void main() {
     expect(restored.backendStage, 'merging');
     expect(restored.backendEngine, 'yt-dlp');
     expect(restored.backendAssetId, 'asset-1');
+    expect(restored.deleted, isFalse);
+
+    final deleted = download()..deleted = true;
+    expect(DownloadEntry.fromJson(deleted.toJson()).deleted, isTrue);
   });
 
   test('DownloadEntry remote JSON excludes device-only fields', () {
@@ -78,6 +84,7 @@ void main() {
       'save_location',
       'file_name',
       'mime_type',
+      'size_bytes',
       'description',
       'wifi_only',
       'headers',
@@ -88,11 +95,23 @@ void main() {
       'backend_engine',
       'backend_asset_id',
       'dirty',
+      'deleted',
     ]) {
       expect(remote, isNot(contains(key)), reason: '$key must stay local');
     }
     expect(remote['quality'], '1080p');
     expect(DownloadEntry.fromJson(remote, remote: true).deviceOwned, isFalse);
+  });
+
+  test('an active server handoff is not treated as a detached download', () {
+    final entry = download()
+      ..state = 'queued'
+      ..nativeId = null
+      ..backendJobId = null
+      ..deviceOwned = true;
+
+    expect(isDetachedDownload(entry, hasActiveAttempt: true), isFalse);
+    expect(isDetachedDownload(entry, hasActiveAttempt: false), isTrue);
   });
 
   test('download reason messages cover pending, paused and failures', () {

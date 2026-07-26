@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:morit/main.dart' show DownloadsPage;
 import 'package:morit/morit/morit_controller.dart';
 import 'package:morit/morit/today/today_overlay.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -12,6 +13,27 @@ AppController testController() => AppController(
     authOptions: const AuthClientOptions(autoRefreshToken: false),
   ),
 );
+
+DownloadEntry downloadEntry({
+  required String id,
+  required String sourceUrl,
+  String state = 'completed',
+  bool deviceOwned = true,
+}) {
+  final now = DateTime.utc(2026, 7, 26, 1);
+  return DownloadEntry(
+    id: id,
+    userId: 'user',
+    sourceUrl: sourceUrl,
+    title: id,
+    mode: 'proxy',
+    state: state,
+    localPath: deviceOwned ? '/storage/emulated/0/Download/$id.mp4' : null,
+    deviceOwned: deviceOwned,
+    createdAt: now.add(Duration(minutes: int.parse(id.split('-').last))),
+    updatedAt: now,
+  );
+}
 
 void main() {
   test(
@@ -118,5 +140,178 @@ void main() {
 
     expect(find.text('잠금화면 정책을 확인하지 못했습니다'), findsOneWidget);
     expect(find.text('오늘 할 일'), findsNothing);
+  });
+
+  test(
+    'history deletion keeps the downloaded file and skips active work',
+    () async {
+      final controller = testController();
+      addTearDown(controller.dispose);
+      final completed = downloadEntry(
+        id: 'download-1',
+        sourceUrl: 'https://youtu.be/public',
+      );
+      final active = downloadEntry(
+        id: 'download-2',
+        sourceUrl: 'https://threads.com/@morit/post/public',
+        state: 'running',
+      );
+      controller.downloads = [completed, active];
+
+      expect(await controller.deleteDownloadRecords([completed, active]), 1);
+      expect(completed.deleted, isTrue);
+      expect(completed.localPath, contains('/Download/download-1.mp4'));
+      expect(controller.visibleDownloads, [active]);
+      expect(await controller.deleteDownloadRecords([active]), 0);
+    },
+  );
+
+  testWidgets('download tabs only show platforms that have history', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 1400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = testController();
+    addTearDown(controller.dispose);
+    controller.downloads = [
+      downloadEntry(
+        id: 'download-1',
+        sourceUrl: 'https://youtube.com/watch?v=one',
+      ),
+      downloadEntry(id: 'download-2', sourceUrl: 'https://youtu.be/two'),
+      downloadEntry(
+        id: 'download-3',
+        sourceUrl: 'https://threads.com/@morit/post/three',
+      ),
+      downloadEntry(
+        id: 'download-4',
+        sourceUrl: 'https://unknown.example/media/four',
+      ),
+      downloadEntry(
+        id: 'download-5',
+        sourceUrl: 'https://instagram.com/p/active',
+        state: 'running',
+      ),
+    ];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: DownloadsPage(controller: controller)),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('전체 4'), findsOneWidget);
+    expect(find.text('YouTube 2'), findsOneWidget);
+    expect(find.text('Threads 1'), findsOneWidget);
+    expect(find.text('기타 1'), findsOneWidget);
+    expect(find.textContaining('Instagram '), findsNothing);
+
+    await tester.tap(find.text('선택'));
+    await tester.pump();
+    expect(find.byType(Checkbox), findsNWidgets(4));
+    await tester.tap(find.byTooltip('선택 취소'));
+    await tester.pump();
+
+    await tester.tap(find.text('YouTube 2'));
+    await tester.pump();
+    expect(find.text('download-1'), findsOneWidget);
+    expect(find.text('download-2'), findsOneWidget);
+    expect(find.text('download-3'), findsNothing);
+    expect(find.text('download-4'), findsNothing);
+    expect(find.text('download-5'), findsOneWidget);
+
+    await tester.longPress(find.text('download-1'));
+    await tester.pump();
+    await tester.tap(find.text('download-2'));
+    await tester.pump();
+    expect(find.text('2개 선택'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('선택한 기록 삭제'));
+    await tester.pump();
+    final dialog = find.byType(AlertDialog);
+    expect(dialog, findsOneWidget);
+    await tester.tap(find.descendant(of: dialog, matching: find.text('취소')));
+    await tester.pump();
+    expect(find.text('download-1'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('선택한 기록 삭제'));
+    await tester.pump();
+    await tester.tap(
+      find.descendant(of: find.byType(AlertDialog), matching: find.text('삭제')),
+    );
+    await tester.pump();
+    expect(find.text('YouTube 2'), findsNothing);
+    expect(find.text('전체 2'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('전체 기록 삭제'));
+    await tester.pump();
+    await tester.tap(
+      find.descendant(of: find.byType(AlertDialog), matching: find.text('삭제')),
+    );
+    await tester.pump();
+    expect(find.text('완료된 다운로드 기록이 여기에 표시돼요.'), findsOneWidget);
+    expect(find.text('download-5'), findsOneWidget);
+  });
+
+  testWidgets('remote history cannot open and stale selection is normalized', (
+    tester,
+  ) async {
+    final controller = testController();
+    addTearDown(controller.dispose);
+    final remote = downloadEntry(
+      id: 'download-1',
+      sourceUrl: 'https://youtu.be/remote',
+      deviceOwned: false,
+    );
+    final threads = downloadEntry(
+      id: 'download-2',
+      sourceUrl: 'https://threads.com/@morit/post/local',
+    );
+    controller.downloads = [remote, threads];
+
+    Widget app() => MaterialApp(
+      home: Scaffold(body: DownloadsPage(controller: controller)),
+    );
+
+    await tester.pumpWidget(app());
+    await tester.tap(find.text('YouTube 1'));
+    await tester.pump();
+    expect(find.text('YouTube · 다른 기기에서 완료'), findsOneWidget);
+    final row = tester.widget<InkWell>(
+      find.ancestor(
+        of: find.text('download-1'),
+        matching: find.byType(InkWell),
+      ),
+    );
+    expect(row.onTap, isNull);
+
+    await tester.longPress(find.text('download-1'));
+    await tester.pump();
+    expect(find.text('1개 선택'), findsOneWidget);
+
+    controller.downloads = [threads];
+    await tester.pumpWidget(app());
+    expect(find.text('기록'), findsOneWidget);
+    expect(find.text('download-2'), findsOneWidget);
+
+    controller.downloads = [
+      threads,
+      downloadEntry(
+        id: 'download-3',
+        sourceUrl: 'https://youtube.com/watch?v=new',
+      ),
+    ];
+    await tester.pumpWidget(app());
+    expect(
+      tester
+          .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, '전체 2'))
+          .selected,
+      isTrue,
+    );
+    expect(find.text('download-2'), findsOneWidget);
+    expect(find.text('download-3'), findsOneWidget);
   });
 }

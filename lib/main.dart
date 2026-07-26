@@ -1443,11 +1443,6 @@ Future<void> _showFavorites(BuildContext context, AppController controller) =>
           child: Column(
             children: [
               ListTile(
-                leading: IconButton(
-                  tooltip: '이전',
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.arrow_back_rounded),
-                ),
                 title: const Text(
                   '즐겨찾기',
                   style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
@@ -1532,11 +1527,6 @@ class _ItemDetailsSheet extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    IconButton(
-                      tooltip: '이전',
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.arrow_back_rounded),
-                    ),
                     Expanded(
                       child: Text(
                         '상세',
@@ -1711,6 +1701,11 @@ String _fileSizeLabel(int bytes) {
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
+
+String _mediaSizeLabel(int? bytes, {bool estimated = false}) =>
+    bytes == null || bytes <= 0
+    ? '크기 확인 중'
+    : '${estimated ? '약 ' : ''}${_fileSizeLabel(bytes)}';
 
 Future<void> _pickInto(
   AppController controller,
@@ -1923,11 +1918,31 @@ Future<void> showDownloadOptions(
   final analysis = await controller.analyzeItemMedia(item);
   if (analysis == null || !context.mounted) return;
   final selected = await showDownloadCandidatePicker(context, analysis);
-  if (selected == null) return;
-  await startMediaDownloads(
+  if (selected == null || !context.mounted) return;
+  _startMediaDownloadsInBackground(
+    context,
     selected,
     (candidate) => controller.downloadCandidate(item, candidate),
   );
+}
+
+void _startMediaDownloadsInBackground(
+  BuildContext context,
+  List<MediaCandidate> candidates,
+  Future<void> Function(MediaCandidate) start,
+) {
+  Future<void> run() async {
+    try {
+      await startMediaDownloads(candidates, start);
+    } on Object {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('일부 다운로드를 시작하지 못했어요. 다운로드 기록을 확인해 주세요.')),
+      );
+    }
+  }
+
+  unawaited(run());
 }
 
 Future<List<MediaCandidate>?> showDownloadCandidatePicker(
@@ -1935,18 +1950,25 @@ Future<List<MediaCandidate>?> showDownloadCandidatePicker(
   MediaAnalysis analysis,
 ) async {
   var selectedUrls = initialMediaSelection(analysis.candidates);
+  final groups = mediaCandidateGroups(analysis.candidates);
   return showModalBottomSheet<List<MediaCandidate>>(
     context: context,
     isScrollControlled: true,
+    showDragHandle: true,
     builder: (context) => StatefulBuilder(
       builder: (context, setSheetState) {
         final selectedCandidates = selectedMediaCandidates(
           analysis.candidates,
           selectedUrls,
         );
-        final height = (230.0 + analysis.candidates.length * 76)
-            .clamp(320.0, MediaQuery.sizeOf(context).height * 0.82)
-            .toDouble();
+        final height =
+            (220.0 +
+                    groups.fold<double>(
+                      0,
+                      (height, group) => height + (group.length > 1 ? 142 : 82),
+                    ))
+                .clamp(320.0, MediaQuery.sizeOf(context).height * 0.82)
+                .toDouble();
         return SafeArea(
           child: SizedBox(
             height: height,
@@ -1954,27 +1976,24 @@ Future<List<MediaCandidate>?> showDownloadCandidatePicker(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 4, 20, 10),
-                  child: Row(
-                    children: [
-                      IconButton(
-                        tooltip: '이전',
-                        onPressed: () => Navigator.pop(context),
-                        icon: const Icon(Icons.arrow_back_rounded),
-                      ),
-                      Expanded(
-                        child: Text(
-                          '${analysis.providerLabel}에서 다운로드할 항목',
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.w800),
-                        ),
-                      ),
-                    ],
+                  padding: const EdgeInsets.fromLTRB(
+                    _MoritUi.pageHorizontal,
+                    0,
+                    _MoritUi.pageHorizontal,
+                    14,
+                  ),
+                  child: Text(
+                    '${analysis.providerLabel}에서 다운로드할 항목',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
                 ),
                 Expanded(
                   child: ListView(
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: _MoritUi.pageHorizontal,
+                    ),
                     children: [
                       _MediaCandidatePicker(
                         candidates: analysis.candidates,
@@ -1986,7 +2005,12 @@ Future<List<MediaCandidate>?> showDownloadCandidatePicker(
                   ),
                 ),
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+                  padding: const EdgeInsets.fromLTRB(
+                    _MoritUi.pageHorizontal,
+                    16,
+                    _MoritUi.pageHorizontal,
+                    24,
+                  ),
                   child: Row(
                     children: [
                       Expanded(
@@ -1995,7 +2019,7 @@ Future<List<MediaCandidate>?> showDownloadCandidatePicker(
                           child: const Text('취소'),
                         ),
                       ),
-                      const SizedBox(width: 10),
+                      const SizedBox(width: 12),
                       Expanded(
                         child: FilledButton.icon(
                           onPressed: selectedCandidates.isEmpty
@@ -2045,53 +2069,86 @@ class _MediaCandidatePicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final allSelected = allMediaAssetsSelected(candidates, selectedUrls);
     return Column(
       children: [
-        if (candidates.length > 1)
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton.icon(
-              onPressed: () =>
-                  onChanged(toggleAllMedia(candidates, selectedUrls)),
-              icon: Icon(
-                allSelected ? Icons.deselect_rounded : Icons.select_all_rounded,
-              ),
-              label: Text(allSelected ? '모두 해제' : '모두 선택'),
-            ),
-          ),
-        for (final candidate in candidates)
-          Material(
-            color: selectedUrls.contains(candidate.url)
-                ? const Color(0xFF167C6A).withValues(alpha: 0.08)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(14),
-            child: ListTile(
-              leading: Icon(_mediaKindIcon(candidate.kind)),
+        for (final group in mediaCandidateGroups(candidates))
+          _asset(context, group),
+      ],
+    );
+  }
+
+  Widget _asset(BuildContext context, List<MediaCandidate> group) {
+    final selected =
+        group.where((value) => selectedUrls.contains(value.url)).firstOrNull ??
+        group.where((value) => value.recommended).firstOrNull ??
+        group.first;
+    final checked = group.any((value) => selectedUrls.contains(value.url));
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: checked
+            ? const Color(0xFF167C6A).withValues(alpha: 0.07)
+            : const Color(0xFFF4F7F6),
+        borderRadius: BorderRadius.circular(_MoritUi.radius),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          children: [
+            CheckboxListTile(
+              value: checked,
+              controlAffinity: ListTileControlAffinity.leading,
+              secondary: Icon(_mediaKindIcon(selected.kind)),
               title: Text(
-                candidate.fileName,
+                selected.fileName,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               subtitle: Text(
-                '${candidate.isPreview ? '페이지 미리보기 · ' : ''}'
-                '${_mediaKindLabel(candidate.kind)}'
-                '${candidate.qualityLabel == null ? '' : ' · ${candidate.qualityLabel}'}'
-                '${candidate.sizeBytes == null ? '' : ' · ${_fileSizeLabel(candidate.sizeBytes!)}'}'
-                ' · ${candidate.mimeType ?? '형식 미확인'}',
+                '${_mediaKindLabel(selected.kind)}'
+                '${group.length == 1 && selected.qualityLabel != null ? ' · ${selected.qualityLabel}' : ''}'
+                ' · ${_mediaSizeLabel(selected.sizeBytes, estimated: selected.sizeEstimated)}'
+                ' · ${selected.mimeType ?? '형식 미확인'}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-              trailing: Checkbox(
-                value: selectedUrls.contains(candidate.url),
-                onChanged: (_) => onChanged(
-                  toggleMediaSelection(candidates, selectedUrls, candidate),
-                ),
-              ),
-              onTap: () => onChanged(
-                toggleMediaSelection(candidates, selectedUrls, candidate),
+              onChanged: (_) => onChanged(
+                toggleMediaSelection(candidates, selectedUrls, selected),
               ),
             ),
-          ),
-      ],
+            if (group.length > 1)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(58, 0, 16, 14),
+                child: DropdownButtonFormField<Uri>(
+                  key: ValueKey(selected.url),
+                  initialValue: selected.url,
+                  decoration: const InputDecoration(
+                    labelText: '품질',
+                    isDense: true,
+                  ),
+                  items: [
+                    for (final quality in group)
+                      DropdownMenuItem(
+                        value: quality.url,
+                        child: Text(
+                          '${quality.qualityLabel ?? '원본'} · ${_mediaSizeLabel(quality.sizeBytes, estimated: quality.sizeEstimated)}',
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                  onChanged: (url) {
+                    final quality = group
+                        .where((value) => value.url == url)
+                        .firstOrNull;
+                    if (quality != null && quality.url != selected.url) {
+                      onChanged(
+                        toggleMediaSelection(candidates, selectedUrls, quality),
+                      );
+                    }
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -2108,6 +2165,9 @@ class _DownloadsPageState extends State<DownloadsPage> {
   Timer? timer;
   final url = TextEditingController();
   bool analyzing = false;
+  bool selectingHistory = false;
+  String platformFilter = 'all';
+  final selectedHistoryIds = <String>{};
 
   @override
   void initState() {
@@ -2160,7 +2220,8 @@ class _DownloadsPageState extends State<DownloadsPage> {
       }
       final selected = await showDownloadCandidatePicker(context, analysis);
       if (selected == null || !mounted) return;
-      await startMediaDownloads(
+      _startMediaDownloadsInBackground(
+        context,
         selected,
         (candidate) => widget.controller.downloadCandidateFromSource(
           sourceUrl: analysis.sourceUrl,
@@ -2173,8 +2234,251 @@ class _DownloadsPageState extends State<DownloadsPage> {
     }
   }
 
+  String _platformId(DownloadEntry entry) {
+    final source = Uri.tryParse(entry.sourceUrl);
+    return source == null ? 'other' : mediaPlatformFor(source)?.id ?? 'other';
+  }
+
+  Future<void> _deleteHistory(
+    List<DownloadEntry> entries, {
+    required bool all,
+  }) async {
+    if (entries.isEmpty) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(all ? '전체 기록을 삭제할까요?' : '다운로드 기록을 삭제할까요?'),
+        content: Text(
+          all
+              ? '이 기기와 현재 서버에서 ${entries.length}개의 기록을 삭제합니다. 기기에 저장된 파일은 유지됩니다.'
+              : '이 기기와 현재 서버에서 기록을 삭제합니다. 기기에 저장된 파일은 유지됩니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('취소'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final deleted = await widget.controller.deleteDownloadRecords(entries);
+    if (!mounted || deleted == 0) return;
+    setState(() {
+      selectedHistoryIds.removeAll(entries.map((value) => value.id));
+      selectingHistory = false;
+      final remaining = widget.controller.visibleDownloads
+          .where(
+            (value) =>
+                {'completed', 'failed', 'canceled'}.contains(value.state) &&
+                _platformId(value) == platformFilter,
+          )
+          .isNotEmpty;
+      if (!remaining) platformFilter = 'all';
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$deleted개의 기록을 삭제했어요. 저장된 파일은 유지됩니다.')),
+    );
+  }
+
+  void _toggleHistorySelection(DownloadEntry entry) {
+    setState(() {
+      selectingHistory = true;
+      if (!selectedHistoryIds.add(entry.id)) {
+        selectedHistoryIds.remove(entry.id);
+      }
+      if (selectedHistoryIds.isEmpty) selectingHistory = false;
+    });
+  }
+
+  Widget _downloadRow(DownloadEntry entry, {required bool history}) {
+    final active = {'queued', 'running', 'paused'}.contains(entry.state);
+    final controllable = entry.deviceOwned;
+    final canOpen =
+        entry.state == 'completed' &&
+        entry.deviceOwned &&
+        (entry.nativeId != null || entry.localPath != null);
+    final selected = selectedHistoryIds.contains(entry.id);
+    final platformLabel =
+        mediaPlatformFor(Uri.tryParse(entry.sourceUrl) ?? Uri())?.label ?? '기타';
+    final row = InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onLongPress: history ? () => _toggleHistorySelection(entry) : null,
+      onTap: history && selectingHistory
+          ? () => _toggleHistorySelection(entry)
+          : canOpen
+          ? () => widget.controller.openDownload(entry)
+          : null,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 13),
+        child: Row(
+          children: [
+            if (history && selectingHistory)
+              Checkbox(
+                value: selected,
+                onChanged: (_) => _toggleHistorySelection(entry),
+              )
+            else
+              Icon(
+                entry.state == 'completed'
+                    ? Icons.check_circle_rounded
+                    : entry.state == 'failed'
+                    ? Icons.error_outline_rounded
+                    : entry.state == 'canceled'
+                    ? Icons.cancel_outlined
+                    : Icons.downloading_rounded,
+                color: entry.state == 'failed'
+                    ? const Color(0xFFC33C36)
+                    : entry.state == 'canceled'
+                    ? const Color(0xFF66736F)
+                    : const Color(0xFF167C6A),
+              ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    entry.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  if (active) ...[
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      value: entry.progress > 0 ? entry.progress / 100 : null,
+                      minHeight: 4,
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ],
+                  const SizedBox(height: 5),
+                  Text(
+                    history
+                        ? '$platformLabel · ${_downloadStatus(entry, active)}'
+                        : _downloadStatus(entry, active),
+                    style: const TextStyle(
+                      color: Color(0xFF66736F),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (history && !selectingHistory)
+              PopupMenuButton<String>(
+                tooltip: '기록 메뉴',
+                icon: const Icon(Icons.more_horiz_rounded),
+                onSelected: (action) {
+                  if (action == 'retry') {
+                    unawaited(widget.controller.retryDownload(entry));
+                  } else {
+                    unawaited(_deleteHistory([entry], all: false));
+                  }
+                },
+                itemBuilder: (context) => [
+                  if (controllable &&
+                      {'failed', 'canceled'}.contains(entry.state))
+                    const PopupMenuItem(
+                      value: 'retry',
+                      child: ListTile(
+                        leading: Icon(Icons.refresh_rounded),
+                        title: Text('다시 시도'),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                    ),
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: ListTile(
+                      leading: Icon(Icons.delete_outline_rounded),
+                      title: Text('기록 삭제'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                ],
+              ),
+            if (!history &&
+                controllable &&
+                {'queued', 'running'}.contains(entry.state)) ...[
+              IconButton(
+                onPressed: () => widget.controller.pauseDownload(entry),
+                icon: const Icon(Icons.pause_rounded),
+                tooltip: '일시 중지',
+              ),
+              IconButton(
+                onPressed: () => widget.controller.cancelDownload(entry),
+                icon: const Icon(Icons.close_rounded),
+                tooltip: '다운로드 취소',
+              ),
+            ] else if (!history && controllable && entry.state == 'paused') ...[
+              IconButton(
+                onPressed: () => widget.controller.resumeDownload(entry),
+                icon: const Icon(Icons.play_arrow_rounded),
+                tooltip: '다시 시작',
+              ),
+              IconButton(
+                onPressed: () => widget.controller.cancelDownload(entry),
+                icon: const Icon(Icons.close_rounded),
+                tooltip: '다운로드 취소',
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+    if (!history || !selectingHistory) return row;
+    return Semantics(
+      checked: selected,
+      button: true,
+      label:
+          '${entry.title}, $platformLabel, ${_downloadStatus(entry, active)}',
+      onTap: () => _toggleHistorySelection(entry),
+      child: ExcludeSemantics(child: row),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final visible = widget.controller.visibleDownloads;
+    final active = visible
+        .where((value) => {'queued', 'running', 'paused'}.contains(value.state))
+        .toList();
+    final history = visible
+        .where(
+          (value) => {'completed', 'failed', 'canceled'}.contains(value.state),
+        )
+        .toList();
+    final hadSelection = selectedHistoryIds.isNotEmpty;
+    selectedHistoryIds.retainAll(history.map((entry) => entry.id));
+    if (selectingHistory && hadSelection && selectedHistoryIds.isEmpty) {
+      selectingHistory = false;
+    }
+    final platformCounts = <String, int>{};
+    for (final entry in history) {
+      final id = _platformId(entry);
+      platformCounts[id] = (platformCounts[id] ?? 0) + 1;
+    }
+    final filters = <(String, String)>[
+      ('all', '전체'),
+      for (final platform in defaultMediaPlatforms)
+        if (platformCounts.containsKey(platform.id))
+          (platform.id, platform.label),
+      if (platformCounts.containsKey('other')) ('other', '기타'),
+    ];
+    if (platformFilter != 'all' &&
+        !platformCounts.containsKey(platformFilter)) {
+      platformFilter = 'all';
+    }
+    final effectiveFilter = platformFilter;
+    final filteredHistory = effectiveFilter == 'all'
+        ? history
+        : history
+              .where((entry) => _platformId(entry) == effectiveFilter)
+              .toList();
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(22, 20, 22, 0),
@@ -2226,131 +2530,141 @@ class _DownloadsPageState extends State<DownloadsPage> {
             ),
             const SizedBox(height: 20),
             Expanded(
-              child: widget.controller.downloads.isEmpty
+              child: visible.isEmpty
                   ? const _EmptyState(
                       icon: Icons.downloading_outlined,
                       title: '다운로드 기록이 없어요',
                       body: '위에 링크를 붙여넣고 원하는 품질을 선택해 보세요.',
                     )
-                  : ListView.separated(
-                      padding: const EdgeInsets.only(bottom: 24),
-                      itemCount: widget.controller.downloads.length,
-                      separatorBuilder: (context, index) =>
-                          const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final entry = widget.controller.downloads[index];
-                        final active = {
-                          'queued',
-                          'running',
-                          'paused',
-                        }.contains(entry.state);
-                        final controllable = entry.deviceOwned;
-                        return InkWell(
-                          onTap: entry.state == 'completed'
-                              ? () => widget.controller.openDownload(entry)
-                              : null,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 14),
+                  : ListView(
+                      padding: const EdgeInsets.only(bottom: 28),
+                      children: [
+                        if (active.isNotEmpty) ...[
+                          Row(
+                            children: [
+                              Text(
+                                '진행 중',
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(fontWeight: FontWeight.w800),
+                              ),
+                              const SizedBox(width: 7),
+                              Text(
+                                '${active.length}',
+                                style: const TextStyle(
+                                  color: Color(0xFF66736F),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 5),
+                          for (
+                            var index = 0;
+                            index < active.length;
+                            index++
+                          ) ...[
+                            _downloadRow(active[index], history: false),
+                            if (index != active.length - 1)
+                              const Divider(height: 1),
+                          ],
+                          const SizedBox(height: 24),
+                        ],
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                selectingHistory
+                                    ? '${selectedHistoryIds.length}개 선택'
+                                    : '기록',
+                                style: Theme.of(context).textTheme.titleMedium
+                                    ?.copyWith(fontWeight: FontWeight.w800),
+                              ),
+                            ),
+                            if (selectingHistory) ...[
+                              IconButton(
+                                onPressed: () => setState(() {
+                                  selectingHistory = false;
+                                  selectedHistoryIds.clear();
+                                }),
+                                icon: const Icon(Icons.close_rounded),
+                                tooltip: '선택 취소',
+                              ),
+                              IconButton.filledTonal(
+                                onPressed: selectedHistoryIds.isEmpty
+                                    ? null
+                                    : () => _deleteHistory(
+                                        history
+                                            .where(
+                                              (entry) => selectedHistoryIds
+                                                  .contains(entry.id),
+                                            )
+                                            .toList(),
+                                        all: false,
+                                      ),
+                                icon: const Icon(Icons.delete_outline_rounded),
+                                tooltip: '선택한 기록 삭제',
+                              ),
+                            ] else if (history.isNotEmpty) ...[
+                              TextButton(
+                                onPressed: () =>
+                                    setState(() => selectingHistory = true),
+                                child: const Text('선택'),
+                              ),
+                              IconButton(
+                                onPressed: () =>
+                                    _deleteHistory(history, all: true),
+                                icon: const Icon(Icons.delete_sweep_outlined),
+                                tooltip: '전체 기록 삭제',
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (history.isEmpty)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 34),
+                            child: Center(
+                              child: Text(
+                                '완료된 다운로드 기록이 여기에 표시돼요.',
+                                style: TextStyle(color: Color(0xFF66736F)),
+                              ),
+                            ),
+                          )
+                        else ...[
+                          const SizedBox(height: 8),
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
                             child: Row(
                               children: [
-                                Icon(
-                                  entry.state == 'completed'
-                                      ? Icons.check_circle_rounded
-                                      : entry.state == 'failed'
-                                      ? Icons.error_outline_rounded
-                                      : Icons.downloading_rounded,
-                                  color: entry.state == 'failed'
-                                      ? const Color(0xFFC33C36)
-                                      : const Color(0xFF167C6A),
-                                ),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        entry.title,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 5),
-                                      if (active)
-                                        LinearProgressIndicator(
-                                          value: entry.progress > 0
-                                              ? entry.progress / 100
-                                              : null,
-                                        ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        _downloadStatus(entry, active),
-                                        style: const TextStyle(
-                                          color: Color(0xFF66736F),
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                    ],
+                                for (final filter in filters) ...[
+                                  ChoiceChip(
+                                    selected: effectiveFilter == filter.$1,
+                                    label: Text(
+                                      '${filter.$2} ${filter.$1 == 'all' ? history.length : platformCounts[filter.$1]}',
+                                    ),
+                                    onSelected: (_) => setState(() {
+                                      platformFilter = filter.$1;
+                                      selectingHistory = false;
+                                      selectedHistoryIds.clear();
+                                    }),
                                   ),
-                                ),
-                                if (controllable &&
-                                    {'queued', 'running'}.contains(entry.state))
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        onPressed: () => widget.controller
-                                            .pauseDownload(entry),
-                                        icon: const Icon(Icons.pause_rounded),
-                                        tooltip: '일시 중지',
-                                      ),
-                                      IconButton(
-                                        onPressed: () => widget.controller
-                                            .cancelDownload(entry),
-                                        icon: const Icon(Icons.close_rounded),
-                                        tooltip: '다운로드 취소',
-                                      ),
-                                    ],
-                                  )
-                                else if (controllable &&
-                                    entry.state == 'paused')
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        onPressed: () => widget.controller
-                                            .resumeDownload(entry),
-                                        icon: const Icon(
-                                          Icons.play_arrow_rounded,
-                                        ),
-                                        tooltip: '다시 시작',
-                                      ),
-                                      IconButton(
-                                        onPressed: () => widget.controller
-                                            .cancelDownload(entry),
-                                        icon: const Icon(Icons.close_rounded),
-                                        tooltip: '다운로드 취소',
-                                      ),
-                                    ],
-                                  )
-                                else if (controllable &&
-                                    {
-                                      'failed',
-                                      'canceled',
-                                    }.contains(entry.state))
-                                  IconButton(
-                                    onPressed: () =>
-                                        widget.controller.retryDownload(entry),
-                                    icon: const Icon(Icons.refresh_rounded),
-                                    tooltip: '다시 시도',
-                                  ),
+                                  const SizedBox(width: 8),
+                                ],
                               ],
                             ),
                           ),
-                        );
-                      },
+                          const SizedBox(height: 8),
+                          for (
+                            var index = 0;
+                            index < filteredHistory.length;
+                            index++
+                          ) ...[
+                            _downloadRow(filteredHistory[index], history: true),
+                            if (index != filteredHistory.length - 1)
+                              const Divider(height: 1),
+                          ],
+                        ],
+                      ],
                     ),
             ),
           ],
@@ -2361,9 +2675,11 @@ class _DownloadsPageState extends State<DownloadsPage> {
 }
 
 String _downloadLabel(DownloadEntry entry) {
-  if (!entry.deviceOwned &&
-      {'queued', 'running', 'paused'}.contains(entry.state)) {
-    return '다른 기기의 다운로드';
+  if (!entry.deviceOwned) {
+    if (entry.state == 'completed') return '다른 기기에서 완료';
+    if ({'queued', 'running', 'paused'}.contains(entry.state)) {
+      return '다른 기기의 다운로드';
+    }
   }
   return switch (entry.state) {
     'queued' => '대기 중',
@@ -2400,11 +2716,17 @@ String _downloadStatus(DownloadEntry entry, bool active) {
       backendStatus != null && entry.error == null && entry.progress > 0
       ? '$status · ${entry.progress}%'
       : status;
+  final size = entry.sizeBytes;
+  final withSize = size != null && size > 0
+      ? '$withProgress · ${_fileSizeLabel(size)}'
+      : active
+      ? '$withProgress · 크기 계산 중'
+      : withProgress;
   final location = entry.saveLocation;
   return location == null ||
           !{'queued', 'running', 'paused', 'completed'}.contains(entry.state)
-      ? withProgress
-      : '$withProgress · 저장 위치: 내 파일 > $location';
+      ? withSize
+      : '$withSize · 저장 위치: 내 파일 > $location';
 }
 
 class SettingsPage extends StatelessWidget {
@@ -2735,11 +3057,6 @@ Future<String?> _chooseSetting(
       mainAxisSize: MainAxisSize.min,
       children: [
         ListTile(
-          leading: IconButton(
-            tooltip: '이전',
-            onPressed: () => Navigator.pop(context),
-            icon: const Icon(Icons.arrow_back_rounded),
-          ),
           title: Text(
             title,
             style: const TextStyle(fontWeight: FontWeight.w800),
@@ -2925,6 +3242,7 @@ class _ShareCapturePageState extends State<ShareCapturePage> {
   String? folderId;
   String kind = 'memo';
   bool saving = false;
+  bool handingOffDownload = false;
   bool analyzingMedia = false;
 
   @override
@@ -2990,7 +3308,10 @@ class _ShareCapturePageState extends State<ShareCapturePage> {
 
   Future<void> save({bool download = false}) async {
     if (widget.controller.session == null || saving) return;
-    setState(() => saving = true);
+    setState(() {
+      saving = true;
+      handingOffDownload = download;
+    });
     final text = payload?['text'] as String? ?? '';
     final uris = (payload?['uris'] as List?)?.cast<String>() ?? const [];
     final fileKind = {'photo', 'video', 'file'}.contains(kind);
@@ -3122,7 +3443,10 @@ class _ShareCapturePageState extends State<ShareCapturePage> {
         } catch (_) {}
       }
       if (!mounted) return;
-      setState(() => saving = false);
+      setState(() {
+        saving = false;
+        handingOffDownload = false;
+      });
       final message = error is PlatformException
           ? error.message
           : error is FormatException
@@ -3143,251 +3467,254 @@ class _ShareCapturePageState extends State<ShareCapturePage> {
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: SafeArea(
-        child: Align(
-          alignment: Alignment.bottomCenter,
-          child: Material(
-            color: const Color(0xFFFBFDFC),
-            borderRadius: const BorderRadius.vertical(
-              top: Radius.circular(_MoritUi.radius),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(22, 14, 22, 24),
-              child: payload == null || widget.controller.busy
-                  ? const SizedBox(
-                      height: 260,
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  : widget.controller.session == null
-                  ? Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.lock_outline_rounded, size: 42),
-                        const SizedBox(height: 14),
-                        Text(
-                          'Morit 로그인이 필요해요',
-                          style: Theme.of(context).textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.w800),
-                        ),
-                        const SizedBox(height: 8),
-                        const Text('앱에서 먼저 로그인한 뒤 다시 공유해 주세요.'),
-                        const SizedBox(height: 20),
-                        FilledButton(
-                          onPressed: SystemNavigator.pop,
-                          child: const Text('확인'),
-                        ),
-                      ],
-                    )
-                  : SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
+        child: handingOffDownload
+            ? const SizedBox.shrink()
+            : Align(
+                alignment: Alignment.bottomCenter,
+                child: Material(
+                  color: const Color(0xFFFBFDFC),
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(_MoritUi.radius),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(22, 14, 22, 24),
+                    child: payload == null || widget.controller.busy
+                        ? const SizedBox(
+                            height: 260,
+                            child: Center(child: CircularProgressIndicator()),
+                          )
+                        : widget.controller.session == null
+                        ? Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              Container(
-                                width: 44,
-                                height: 44,
-                                decoration: BoxDecoration(
-                                  color: const Color(
-                                    0xFF167C6A,
-                                  ).withValues(alpha: 0.1),
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                                child: Icon(
-                                  _kindIcon(kind),
-                                  color: const Color(0xFF167C6A),
-                                ),
+                              const Icon(Icons.lock_outline_rounded, size: 42),
+                              const SizedBox(height: 14),
+                              Text(
+                                'Morit 로그인이 필요해요',
+                                style: Theme.of(context).textTheme.titleLarge
+                                    ?.copyWith(fontWeight: FontWeight.w800),
                               ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Text(
-                                  'Morit에 저장',
-                                  style: Theme.of(context).textTheme.titleLarge
-                                      ?.copyWith(fontWeight: FontWeight.w800),
-                                ),
-                              ),
-                              IconButton(
+                              const SizedBox(height: 8),
+                              const Text('앱에서 먼저 로그인한 뒤 다시 공유해 주세요.'),
+                              const SizedBox(height: 20),
+                              FilledButton(
                                 onPressed: SystemNavigator.pop,
-                                tooltip: '이전',
-                                icon: const Icon(Icons.arrow_back_rounded),
+                                child: const Text('확인'),
                               ),
                             ],
-                          ),
-                          const SizedBox(height: 16),
-                          if (analyzingMedia) ...[
-                            const LinearProgressIndicator(),
-                            const SizedBox(height: 8),
-                            Text(
-                              '저장 가능한 형식을 확인하는 중…',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 12),
-                          ],
-                          if (mediaAnalysis case final analysis?) ...[
-                            Text(
-                              '${analysis.providerLabel} 페이지가 공개한 저장 항목',
-                              style: Theme.of(context).textTheme.titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.w800),
-                            ),
-                            const SizedBox(height: 8),
-                            _MediaCandidatePicker(
-                              candidates: analysis.candidates,
-                              selectedUrls: selectedMediaUrls,
-                              onChanged: (value) =>
-                                  setState(() => selectedMediaUrls = value),
-                            ),
-                            const SizedBox(height: 4),
-                          ] else if (mediaAnalysisAttempted &&
-                              !analyzingMedia) ...[
-                            Text(
-                              '${mediaFailure?.message ?? '이 페이지에서 공개된 다운로드 파일을 찾지 못했어요.'} 링크 자체는 저장할 수 있습니다.',
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                            const SizedBox(height: 12),
-                          ],
-                          if ((payload?['uris'] as List?)?.isNotEmpty ==
-                              true) ...[
-                            Container(
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                  color: const Color(0xFFE2E9E7),
-                                ),
-                              ),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    _kindIcon(kind),
-                                    color: const Color(0xFF167C6A),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Text(
-                                      '${(payload!['uris'] as List).length}개 파일 · ${payload?['mimeType'] ?? '형식 정보 없음'}',
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                          ],
-                          TextField(
-                            controller: title,
-                            decoration: const InputDecoration(labelText: '제목'),
-                          ),
-                          const SizedBox(height: 10),
-                          DropdownButtonFormField<String?>(
-                            initialValue: folderId,
-                            decoration: const InputDecoration(labelText: '폴더'),
-                            items: [
-                              const DropdownMenuItem(
-                                value: null,
-                                child: Text('폴더 없음'),
-                              ),
-                              ...widget.controller.visibleFolders.map(
-                                (folder) => DropdownMenuItem(
-                                  value: folder.id,
-                                  child: Text(
-                                    widget.controller
-                                        .folderPath(folder.id)
-                                        .map((value) => value.name)
-                                        .join(' / '),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ),
-                            ],
-                            onChanged: (value) =>
-                                setState(() => folderId = value),
-                          ),
-                          const SizedBox(height: 10),
-                          TextField(
-                            controller: note,
-                            minLines: 2,
-                            maxLines: 4,
-                            decoration: const InputDecoration(
-                              labelText: '메모 추가',
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          if (selectedMediaUrls.isNotEmpty)
-                            Column(
+                          )
+                        : SingleChildScrollView(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Row(
                                   children: [
-                                    Expanded(
-                                      child: OutlinedButton.icon(
-                                        onPressed: saving ? null : save,
-                                        icon: const Icon(
-                                          Icons.bookmark_add_outlined,
-                                        ),
-                                        label: const Text('저장'),
-                                      ),
+                                    Image.asset(
+                                      'docs/app_logo_transparent.png',
+                                      width: 44,
+                                      height: 44,
+                                      fit: BoxFit.contain,
+                                      semanticLabel: 'Morit 앱 로고',
                                     ),
-                                    const SizedBox(width: 10),
+                                    const SizedBox(width: 12),
                                     Expanded(
-                                      child: FilledButton.icon(
-                                        onPressed: saving
-                                            ? null
-                                            : () => save(download: true),
-                                        icon: const Icon(
-                                          Icons.download_rounded,
-                                        ),
-                                        label: Text(
-                                          saving
-                                              ? '처리 중'
-                                              : '${selectedMediaUrls.length}개 다운로드',
-                                        ),
+                                      child: Text(
+                                        'Morit에 저장',
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleLarge
+                                            ?.copyWith(
+                                              fontWeight: FontWeight.w800,
+                                            ),
                                       ),
                                     ),
                                   ],
                                 ),
-                                const SizedBox(height: 8),
-                                SizedBox(
-                                  width: double.infinity,
-                                  child: OutlinedButton(
-                                    onPressed: saving
-                                        ? null
-                                        : SystemNavigator.pop,
-                                    child: const Text('취소'),
+                                const SizedBox(height: 16),
+                                if (analyzingMedia) ...[
+                                  const LinearProgressIndicator(),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    '저장 가능한 형식을 확인하는 중…',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
                                   ),
-                                ),
-                              ],
-                            )
-                          else
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: OutlinedButton(
-                                    onPressed: saving
-                                        ? null
-                                        : SystemNavigator.pop,
-                                    child: const Text('취소'),
+                                  const SizedBox(height: 12),
+                                ],
+                                if (mediaAnalysis case final analysis?) ...[
+                                  Text(
+                                    '${analysis.providerLabel} 페이지가 공개한 저장 항목',
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleMedium
+                                        ?.copyWith(fontWeight: FontWeight.w800),
                                   ),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: FilledButton.icon(
-                                    onPressed: saving ? null : save,
-                                    icon: const Icon(
-                                      Icons.bookmark_add_outlined,
+                                  const SizedBox(height: 8),
+                                  _MediaCandidatePicker(
+                                    candidates: analysis.candidates,
+                                    selectedUrls: selectedMediaUrls,
+                                    onChanged: (value) => setState(
+                                      () => selectedMediaUrls = value,
                                     ),
-                                    label: Text(saving ? '저장 중' : '저장'),
+                                  ),
+                                  const SizedBox(height: 4),
+                                ] else if (mediaAnalysisAttempted &&
+                                    !analyzingMedia) ...[
+                                  Text(
+                                    '${mediaFailure?.message ?? '이 페이지에서 공개된 다운로드 파일을 찾지 못했어요.'} 링크 자체는 저장할 수 있습니다.',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
+                                  ),
+                                  const SizedBox(height: 12),
+                                ],
+                                if ((payload?['uris'] as List?)?.isNotEmpty ==
+                                    true) ...[
+                                  Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      borderRadius: BorderRadius.circular(16),
+                                      border: Border.all(
+                                        color: const Color(0xFFE2E9E7),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          _kindIcon(kind),
+                                          color: const Color(0xFF167C6A),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Text(
+                                            '${(payload!['uris'] as List).length}개 파일 · ${payload?['mimeType'] ?? '형식 정보 없음'}',
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                ],
+                                TextField(
+                                  controller: title,
+                                  decoration: const InputDecoration(
+                                    labelText: '제목',
                                   ),
                                 ),
+                                const SizedBox(height: 10),
+                                DropdownButtonFormField<String?>(
+                                  initialValue: folderId,
+                                  decoration: const InputDecoration(
+                                    labelText: '폴더',
+                                  ),
+                                  items: [
+                                    const DropdownMenuItem(
+                                      value: null,
+                                      child: Text('폴더 없음'),
+                                    ),
+                                    ...widget.controller.visibleFolders.map(
+                                      (folder) => DropdownMenuItem(
+                                        value: folder.id,
+                                        child: Text(
+                                          widget.controller
+                                              .folderPath(folder.id)
+                                              .map((value) => value.name)
+                                              .join(' / '),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                  onChanged: (value) =>
+                                      setState(() => folderId = value),
+                                ),
+                                const SizedBox(height: 10),
+                                TextField(
+                                  controller: note,
+                                  minLines: 2,
+                                  maxLines: 4,
+                                  decoration: const InputDecoration(
+                                    labelText: '메모 추가',
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                if (selectedMediaUrls.isNotEmpty)
+                                  Column(
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: OutlinedButton.icon(
+                                              onPressed: saving ? null : save,
+                                              icon: const Icon(
+                                                Icons.bookmark_add_outlined,
+                                              ),
+                                              label: const Text('저장'),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            child: FilledButton.icon(
+                                              onPressed: saving
+                                                  ? null
+                                                  : () => save(download: true),
+                                              icon: const Icon(
+                                                Icons.download_rounded,
+                                              ),
+                                              label: Text(
+                                                '${selectedMediaUrls.length}개 다운로드',
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 12),
+                                      SizedBox(
+                                        width: double.infinity,
+                                        child: OutlinedButton(
+                                          onPressed: saving
+                                              ? null
+                                              : SystemNavigator.pop,
+                                          child: const Text('취소'),
+                                        ),
+                                      ),
+                                    ],
+                                  )
+                                else
+                                  Row(
+                                    children: [
+                                      Expanded(
+                                        child: OutlinedButton(
+                                          onPressed: saving
+                                              ? null
+                                              : SystemNavigator.pop,
+                                          child: const Text('취소'),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: FilledButton.icon(
+                                          onPressed: saving ? null : save,
+                                          icon: const Icon(
+                                            Icons.bookmark_add_outlined,
+                                          ),
+                                          label: Text(saving ? '저장 중' : '저장'),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                               ],
                             ),
-                        ],
-                      ),
-                    ),
-            ),
-          ),
-        ),
+                          ),
+                  ),
+                ),
+              ),
       ),
     );
   }
@@ -3409,11 +3736,6 @@ Future<void> showComposeSheet(
           children: [
             Row(
               children: [
-                IconButton(
-                  tooltip: '이전',
-                  onPressed: () => Navigator.pop(context),
-                  icon: const Icon(Icons.arrow_back_rounded),
-                ),
                 Expanded(
                   child: Text(
                     '무엇을 저장할까요?',
@@ -3512,22 +3834,11 @@ Future<void> showItemEditor(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  IconButton(
-                    tooltip: '이전',
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.arrow_back_rounded),
-                  ),
-                  Expanded(
-                    child: Text(
-                      '${_kindLabel(kind)} 저장',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                ],
+              Text(
+                '${_kindLabel(kind)} 저장',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
               ),
               const SizedBox(height: 16),
               TextField(
@@ -3726,11 +4037,6 @@ Future<void> showEditItemSheet(
             children: [
               Row(
                 children: [
-                  IconButton(
-                    tooltip: '이전',
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.arrow_back_rounded),
-                  ),
                   Expanded(
                     child: Text(
                       '항목 수정',
@@ -3922,11 +4228,6 @@ Future<void> showMoveSheet(
           shrinkWrap: true,
           children: [
             ListTile(
-              leading: IconButton(
-                tooltip: '이전',
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.arrow_back_rounded),
-              ),
               title: const Text(
                 '이동할 폴더',
                 style: TextStyle(fontWeight: FontWeight.w800),
@@ -4184,11 +4485,6 @@ Future<void> showFolderMenu(
         mainAxisSize: MainAxisSize.min,
         children: [
           ListTile(
-            leading: IconButton(
-              tooltip: '이전',
-              onPressed: () => Navigator.pop(context),
-              icon: const Icon(Icons.arrow_back_rounded),
-            ),
             title: const Text(
               '폴더',
               style: TextStyle(fontWeight: FontWeight.w800),

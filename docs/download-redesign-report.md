@@ -80,9 +80,47 @@ yt-dlp의 Instagram extractor가 이미지 캐러셀 entry에 `formats` 없이 �
 `thumbnails`로 반환하는 실제 동작을 별도 처리했다. Instagram에만 한정해
 `instagram.<region>.fna.fbcdn.net`, HTTPS/443, 이미지 확장자, 중복 없는
 `oh`/`oe`/`ig_cache_key`, resize/crop 변환이 없는 서명 URL만 원본으로 허용한다.
-작업 시작 시 동일 entry ID와 playlist index를 다시 분석해 만료 서명을 갱신하고,
-각 redirect마다 URL과 공개 DNS를 다시 검증한다. 일반 영상 entry는 계속 yt-dlp가
+분석에서 받은 서명 URL로 즉시 스트리밍하고, 만료·전송 실패 시에만 동일 entry ID와
+playlist index를 다시 분석해 서명을 갱신한다. 각 redirect마다 URL과 공개 DNS를
+다시 검증한다. 일반 영상 entry는 계속 yt-dlp가
 처리하므로 혼합 캐러셀의 영상 경로를 덮어쓰지 않는다.
+
+## 2026-07-25 성능 최적화
+
+- 앱은 동일 계정·URL의 성공한 분석을 10분간 최대 20건 캐시하고 HTTP 연결을
+  재사용한다. 서버도 사용자별 분석을 기존 15분 TTL 안에서 재사용하므로 캐시 적중
+  요청은 yt-dlp/Cobalt를 다시 실행하지 않는다.
+- 다운로드 상태 저장은 오늘 할 일 알림 재생성과 분리해, 작업 생성 전에 무관한
+  네이티브 알림 동기화를 기다리지 않는다.
+- Instagram, X, Facebook, Threads, TikTok은 Cobalt를 먼저 사용하고 실패할 때만
+  yt-dlp로 전환한다. YouTube는 품질 목록을 보존하기 위해 yt-dlp를 우선한다.
+- Cobalt/Instagram 파일은 분석 응답의 미디어 URL로 바로 스트리밍하고, 재시도 가능한
+  실패가 발생한 경우에만 URL을 갱신한다. 256 KiB 청크와 Android DownloadManager
+  저장 경로는 유지해 전체 파일의 메모리 복사를 만들지 않는다.
+- FFmpeg 완료 검증은 전체 재디코딩 대신 전체 패킷 demux/stream-copy 검증으로
+  변경했다. ffprobe의 컨테이너·코덱·스트림 검증과 Content-Length 검증은 유지한다.
+- Android JobService는 한 번 조회 후 최소 10초 재예약하던 흐름을 제거하고,
+  처음 두 번 750ms, 이후 2초 간격으로 활성 작업을 이어서 확인한다. 서버 준비
+  단계부터 ongoing 진행 알림을 표시하고 여러 작업이면 남은 작업 수도 표시한다.
+  DownloadManager가 실제 파일 저장을 넘겨받으면 시스템 진행 알림으로 전환한다.
+- 완료 알림에는 파일 열기, 시스템 다운로드 목록 열기, 공유 액션을 제공한다.
+  후보 크기가 0 또는 미확인이면 `0B` 대신 `계산 중`으로 표시하고, 서버 또는
+  DownloadManager가 실제 크기를 확인하면 다운로드 기록에 자동 반영한다.
+
+동일 Oracle E2 Micro, 동일 공개 fixture에서 `time.perf_counter`로 측정했다.
+
+| 구간 | 이전 | 최적화 후 |
+|---|---:|---:|
+| Instagram 5장 게시물 최초 분석 | 9.462초 | 0.980초 |
+| Instagram 동일 URL 재분석 | 9.462초 수준 | 0.002초 |
+| Instagram 첫 사진 서버 작업 완료 | 1.614초 | 중앙값 0.713초 (0.872/0.713/0.691) |
+| YouTube 품질 목록 최초 분석 | 19.973초 | 17.011초 |
+| YouTube 동일 URL 서버 재조회 | 19.973초 수준 | 0.078초 |
+| Android 서버 완료 감지 간격 | JobScheduler 최소 10초 | 활성 작업 최대 약 2초 |
+
+YouTube 최초 분석은 yt-dlp의 JavaScript challenge와 품질 열거가 지배하므로 네트워크
+상태에 따라 변동한다. 품질 선택을 없애고 Cobalt 단일 최고 화질만 반환하는 방식은
+요구사항을 훼손하므로 적용하지 않았다. 앱 캐시 적중 시에는 위 78ms 서버 호출도 없다.
 
 ## 보안 점검
 
@@ -126,7 +164,7 @@ yt-dlp의 Instagram extractor가 이미지 캐러셀 entry에 `formats` 없이 �
 ## 자동·빌드·Android 검증
 
 - `flutter analyze`: 오류 0
-- `flutter test`: 60/60 통과
+- `flutter test`: 61/61 통과
 - Android Kotlin 컴파일: 통과
 - Android JVM 단위 테스트: 5/5 통과
 - `python -m py_compile app.py test_app.py`: 통과
@@ -139,20 +177,39 @@ yt-dlp의 Instagram extractor가 이미지 캐러셀 entry에 `formats` 없이 �
 - 릴리스 APK: v2/v3 서명 통과, Android 17/API 37 에뮬레이터에 `adb install -r`
   성공, 버전 `1.5.0+8`, 콜드 실행 fatal crash 0
 - APK SHA-256:
-  `927DD3C1972692D0D080DA337F90AE86F4DBF351FCE05BB5AD19E915212DA487`
+  `BA48DC68E5AE227775FB95BF4EBCE28ED6171047DFB64A0834B374AFC1E9C7ED`
+
+## Oracle Always Free 배포
+
+- 도쿄 홈 리전에 `VM.Standard.E2.1.Micro`(1 OCPU, 1 GB)와 기본 46.6 GB
+  부트 볼륨을 배포했다. 두 자원 모두 Always Free 한도 안이며 유료 계정 업그레이드,
+  유료 로드 밸런서, 유료 DNS는 사용하지 않았다.
+- A1 Flex 1 OCPU/6 GB는 도쿄 AD-1 용량 부족으로 두 번 거절되어 자원이 생성되지
+  않았다. 즉시 사용 가능한 E2 Micro로 전환하고 2 GB swap을 추가했다.
+- 백엔드는 GitHub `MoringLab/morit`의 `2010bd0`을 사용한다. downloader는
+  `127.0.0.1:8080`에만 바인딩하고 Cobalt는 Docker 내부 네트워크에만 노출한다.
+- Caddy가 무료 `sslip.io` 호스트명으로 Let's Encrypt 인증서를 자동 갱신하며
+  80은 443으로 리디렉션한다. OCI 보안 목록과 서버 iptables는 22/80/443만
+  인바운드 허용한다.
+- 공개 `/health`에서 yt-dlp, yt-dlp-ejs, Deno, FFmpeg/ffprobe, Cobalt가 모두
+  `true`임을 확인했고, 인증 없는 `/v1/analyze`는 401을 반환했다.
+- 무료 VM 메모리 한계 때문에 동시 분석과 다운로드를 각각 1개로 제한했다.
+  Docker와 Caddy는 부팅 자동 시작, 두 컨테이너는 `unless-stopped`로 설정했다.
+- Docker JSON 로그는 컨테이너당 10 MB × 3개로 회전한다. 서버 전체 재부팅 후
+  2 GB swap, 22/80/443 iptables 규칙, Docker, Caddy, downloader와 Cobalt가
+  자동 복구되고 외부 HTTPS health가 다시 정상 응답하는 것을 확인했다.
 
 ## 남은 외부 조건과 제약
 
-1. **운영 백엔드 배포 필요:** 자체 서버/도메인, TLS, `PUBLIC_BASE_URL`과
-   `DOWNLOAD_API_URL`이 아직 없다. `.env.example`을 기반으로 서버 환경 변수를
-   설정해 `docker compose up -d --build`한 뒤 앱의 `config/local.json`에 같은 공개
-   HTTPS origin을 넣고 APK를 다시 빌드해야 한다.
-2. **물리 기기 미검증:** 현재 연결 대상은 Android 17/API 37 에뮬레이터뿐이다.
+1. **물리 기기 미검증:** 현재 연결 대상은 Android 17/API 37 에뮬레이터뿐이다.
    삼성 One UI 물리 기기의 갤러리/내 파일 노출, 절전·재부팅, 실제 재생과 장시간
    백그라운드 작업은 아직 통과로 주장할 수 없다.
-3. **앱 E2E 미검증:** 배포 endpoint와 로그인 테스트 계정이 없어 Flutter 앱에서
+2. **앱 E2E 미검증:** 로그인 테스트 계정이 없어 Flutter 앱에서
    분석→품질 선택→다운로드→외부 앱 재생 전체 흐름은 물리 기기에서 수행하지 못했다.
-   서버 실파일 검증과 Android 저장 계층 자동 검증은 각각 통과했다.
+   배포 endpoint의 공개 health/TLS/인증 차단과 Android 저장 계층 자동 검증은
+   각각 통과했다.
+3. **무료 VM 처리량:** E2 Micro는 동시 1개 작업용이다. 여러 사용자가 동시에
+   다운로드하거나 고화질 변환이 잦아지면 A1 Always Free 용량 확보 후 이전해야 한다.
 4. **인증/DRM 우회 없음:** 로그인·쿠키가 필요한 Story, 비공개 게시물, DRM,
    지역 제한은 정확한 실패로 반환한다. 사용자 쿠키나 플랫폼 토큰을 APK/서버에
    저장하는 우회는 구현하지 않았다.
