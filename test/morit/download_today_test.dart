@@ -151,50 +151,58 @@ void main() {
     );
   });
 
-  test(
-    'pending native jobs stop being treated as active after two minutes',
-    () {
-      final lastModified = DateTime.utc(2026, 7, 23, 1);
+  test('native state and progress never move backward', () {
+    expect(mergeNativeDownloadState('running', 1), 'running');
+    expect(mergeNativeDownloadState('queued', 1), 'queued');
+    expect(mergeNativeDownloadState('running', 8), 'completed');
+    expect(mergeNativeDownloadState('completed', 2), 'completed');
+    expect(mergeBackendDownloadState('running', 'waiting'), 'running');
+    expect(mergeBackendDownloadState('queued', 'running'), 'running');
+    expect(
+      mergeNativeDownloadProgress(
+        currentProgress: 91,
+        mode: 'proxy',
+        nativeStatus: 2,
+        bytesDownloaded: 1,
+        totalBytes: 100,
+      ),
+      91,
+    );
+    expect(
+      mergeNativeDownloadProgress(
+        currentProgress: 85,
+        mode: 'proxy',
+        nativeStatus: 2,
+        bytesDownloaded: 50,
+        totalBytes: 100,
+      ),
+      92,
+    );
+    expect(
+      mergeNativeDownloadProgress(
+        currentProgress: 85,
+        mode: 'proxy',
+        nativeStatus: 1,
+        bytesDownloaded: 0,
+        totalBytes: -1,
+      ),
+      85,
+    );
+  });
 
-      expect(
-        isDownloadStartStalled(
-          status: 1,
-          bytesDownloaded: 0,
-          lastModified: lastModified,
-          now: lastModified.add(downloadStartTimeout),
-        ),
-        isTrue,
-      );
-      expect(
-        isDownloadStartStalled(
-          status: 1,
-          bytesDownloaded: 1,
-          lastModified: lastModified,
-          now: lastModified.add(const Duration(hours: 1)),
-        ),
-        isFalse,
-      );
-      expect(
-        isDownloadStartStalled(
-          status: 2,
-          bytesDownloaded: 0,
-          lastModified: lastModified,
-          now: lastModified.add(const Duration(hours: 1)),
-        ),
-        isFalse,
-      );
-      expect(
-        isDownloadStartStalled(
-          status: 1,
-          bytesDownloaded: 0,
-          lastModified: lastModified,
-          wifiOnly: true,
-          now: lastModified.add(const Duration(hours: 1)),
-        ),
-        isFalse,
-      );
-    },
-  );
+  test('active device downloads remain authoritative during sync', () {
+    final entry = download()
+      ..dirty = false
+      ..state = 'running'
+      ..deviceOwned = true;
+
+    expect(keepLocalDownloadDuringSync(entry, hasActiveAttempt: false), isTrue);
+    entry.state = 'completed';
+    expect(
+      keepLocalDownloadDuringSync(entry, hasActiveAttempt: false),
+      isFalse,
+    );
+  });
 
   test('today membership keeps completed memos until rollover', () {
     expect(isTodayItem(memo(metadata: {'today': true})), isTrue);
@@ -242,6 +250,7 @@ void main() {
 
       const platform = MoritPlatform();
       final job = await platform.enqueueDownload(
+        taskId: 'download-1',
         url: Uri.parse('https://cdn.example.com/video.mp4'),
         fileName: 'video.mp4',
         title: '영상',
@@ -277,6 +286,7 @@ void main() {
       expect(todayPosted, isTrue);
       expect(calls[0].method, 'enqueueDownload');
       expect(calls[0].arguments, {
+        'taskId': 'download-1',
         'url': 'https://cdn.example.com/video.mp4',
         'fileName': 'video.mp4',
         'mediaKind': 'video',
@@ -319,6 +329,7 @@ void main() {
 
     await expectLater(
       platform.enqueueDownload(
+        taskId: 'download-1',
         url: Uri.parse('https://cdn.example.com/video.mp4'),
         fileName: 'video.mp4',
         title: '영상',
@@ -332,6 +343,7 @@ void main() {
   test('platform rejects a non-positive expected content length', () async {
     await expectLater(
       const MoritPlatform().enqueueDownload(
+        taskId: 'download-1',
         url: Uri.parse('https://cdn.example.com/video.mp4'),
         fileName: 'video.mp4',
         title: '영상',

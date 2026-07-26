@@ -279,7 +279,7 @@ void main() {
     await tester.pumpWidget(app());
     await tester.tap(find.text('YouTube 1'));
     await tester.pump();
-    expect(find.text('YouTube · 다른 기기에서 완료'), findsOneWidget);
+    expect(find.text('YouTube · 다른 기기에서 완료 · 크기 확인 불가'), findsOneWidget);
     final row = tester.widget<InkWell>(
       find.ancestor(
         of: find.text('download-1'),

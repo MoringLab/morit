@@ -2693,8 +2693,7 @@ String _downloadLabel(DownloadEntry entry) {
 }
 
 String _downloadStatus(DownloadEntry entry, bool active) {
-  final backendStatus =
-      active && entry.backendJobId != null && entry.nativeId == null
+  final backendStatus = active && entry.backendJobId != null
       ? switch (entry.backendStage) {
           'queued' => '서버 작업 대기 중',
           'analyzing' => '원본 분석 중',
@@ -2704,6 +2703,7 @@ String _downloadStatus(DownloadEntry entry, bool active) {
           'converting' => '형식 변환 중',
           'validating' => '완료 파일 검증 중',
           'verifying' => '완료 파일 검증 중',
+          'device_queuing' || 'device_download' => '기기에 저장 중',
           _ => '서버에서 파일 준비 중',
         }
       : null;
@@ -2719,9 +2719,7 @@ String _downloadStatus(DownloadEntry entry, bool active) {
   final size = entry.sizeBytes;
   final withSize = size != null && size > 0
       ? '$withProgress · ${_fileSizeLabel(size)}'
-      : active
-      ? '$withProgress · 크기 계산 중'
-      : withProgress;
+      : '$withProgress · 크기 확인 불가';
   final location = entry.saveLocation;
   return location == null ||
           !{'queued', 'running', 'paused', 'completed'}.contains(entry.state)

@@ -1,0 +1,12 @@
+services:
+  downloader:
+    environment:
+      YT_DLP_FORCE_IPV6: "true"
+
+  cobalt:
+    environment:
+      NODE_OPTIONS: --dns-result-order=ipv6first
+
+networks:
+  media:
+    enable_ipv6: true

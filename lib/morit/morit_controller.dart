@@ -161,21 +161,83 @@ String downloadReasonMessage(int status, int reason, {bool wifiOnly = false}) {
   };
 }
 
-const downloadStartTimeout = Duration(minutes: 2);
 const backendPreparationTimeout = Duration(minutes: 60);
 
-bool isDownloadStartStalled({
-  required int status,
+String mergeNativeDownloadState(String currentState, int? nativeStatus) {
+  if (const {'completed', 'failed', 'canceled'}.contains(currentState)) {
+    return currentState;
+  }
+  return switch (nativeStatus) {
+    1 => currentState,
+    2 => 'running',
+    4 => 'paused',
+    8 => 'completed',
+    16 => 'failed',
+    _ => currentState,
+  };
+}
+
+String mergeBackendDownloadState(String currentState, String backendStatus) {
+  if (const {'completed', 'failed', 'canceled'}.contains(currentState)) {
+    return currentState;
+  }
+  final nextState = switch (backendStatus) {
+    'failed' => 'failed',
+    'canceled' => 'canceled',
+    'scheduled' || 'waiting' || 'queued' => 'queued',
+    _ => 'running',
+  };
+  return currentState == 'running' && nextState == 'queued'
+      ? currentState
+      : nextState;
+}
+
+int mergeNativeDownloadProgress({
+  required int currentProgress,
+  required String mode,
+  required int nativeStatus,
   required int bytesDownloaded,
-  required DateTime lastModified,
-  bool wifiOnly = false,
-  DateTime? now,
+  required int totalBytes,
+}) {
+  if (nativeStatus == 8) return 100;
+  if (bytesDownloaded < 0 || totalBytes <= 0) return currentProgress;
+  final deviceProgress = (bytesDownloaded * 100 ~/ totalBytes).clamp(0, 100);
+  final next = mode == 'proxy'
+      ? 85 + deviceProgress * 15 ~/ 100
+      : deviceProgress;
+  return next > currentProgress ? next : currentProgress;
+}
+
+bool keepLocalDownloadDuringSync(
+  DownloadEntry entry, {
+  required bool hasActiveAttempt,
 }) =>
-    !wifiOnly &&
-    status == 1 &&
-    bytesDownloaded <= 0 &&
-    (now ?? DateTime.now().toUtc()).difference(lastModified.toUtc()) >=
-        downloadStartTimeout;
+    entry.dirty ||
+    entry.deleted ||
+    hasActiveAttempt ||
+    entry.deviceOwned &&
+        const {'queued', 'running', 'paused'}.contains(entry.state);
+
+void _logDownloadTransition(
+  DownloadEntry entry, {
+  required String event,
+  required String previousState,
+  required int previousProgress,
+  int? nativeStatus,
+  int? reason,
+  int? bytesDownloaded,
+  int? totalBytes,
+}) {
+  debugPrint(
+    'MoritDownload event=$event entry=${entry.id} '
+    'backend=${entry.backendJobId ?? '-'} native=${entry.nativeId ?? '-'} '
+    'state=$previousState->${entry.state} '
+    'progress=$previousProgress->${entry.progress} '
+    'stage=${entry.backendStage ?? '-'} status=${nativeStatus ?? '-'} '
+    'reason=${reason ?? '-'} bytes=${bytesDownloaded ?? '-'} '
+    'total=${totalBytes ?? '-'}',
+  );
+}
 
 bool isDetachedDownload(
   DownloadEntry entry, {
@@ -511,12 +573,13 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
           DownloadEntry.fromJson,
         ),
         (value) => value.id,
-        (value) =>
-            value.dirty ||
-            value.deleted ||
-            _downloadAttempts.containsKey(value.id),
+        (value) => keepLocalDownloadDuringSync(
+          value,
+          hasActiveAttempt: _downloadAttempts.containsKey(value.id),
+        ),
         (value) => value.updatedAt,
       );
+      await _recoverDetachedDownloads();
       _normalizeDetachedDownloads();
       _normalizeLegacyMediaSources();
       _normalizeLocalFileItems(userId);
@@ -896,6 +959,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         prefs.getString(_key('attachments', userId)),
         MoritAttachment.fromLocal,
       );
+      final recoveredDownloads = await _recoverDetachedDownloads();
       _normalizeDetachedDownloads();
       _normalizeLegacyMediaSources();
       _normalizeLocalFileItems(userId);
@@ -919,7 +983,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       if (handoffKeys.isNotEmpty) _normalizeLocalFileItems(userId);
       _loadedUserId = userId;
       _scheduleDayRollover();
-      if (handoffKeys.isNotEmpty) {
+      if (handoffKeys.isNotEmpty || recoveredDownloads) {
         await _save(userId);
         if (!active()) return;
         await Future.wait(handoffKeys.map(prefs.remove));
@@ -1019,6 +1083,43 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       entry.updatedAt = now;
       entry.dirty = true;
     }
+  }
+
+  Future<bool> _recoverDetachedDownloads() async {
+    var recovered = false;
+    for (final entry
+        in downloads
+            .where(
+              (value) =>
+                  !value.deleted &&
+                  isDetachedDownload(
+                    value,
+                    hasActiveAttempt: _downloadAttempts.containsKey(value.id),
+                  ),
+            )
+            .toList()) {
+      try {
+        final nativeId = await _platform.queryDownloadTask(entry.id);
+        if (nativeId == null ||
+            entry.nativeId != null ||
+            entry.backendJobId != null) {
+          continue;
+        }
+        entry
+          ..nativeId = nativeId
+          ..error = null;
+        recovered = true;
+        _logDownloadTransition(
+          entry,
+          event: 'device_recovered',
+          previousState: entry.state,
+          previousProgress: entry.progress,
+        );
+      } catch (_) {
+        // Older Android builds have no task-ID reconciliation method.
+      }
+    }
+    return recovered;
   }
 
   void _normalizeLegacyMediaSources() {
@@ -1548,6 +1649,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         entry.saveLocation = local?.saveLocation;
         entry.fileName = local?.fileName;
         entry.mimeType = local?.mimeType;
+        entry.sizeBytes = local?.sizeBytes;
         entry.description = local?.description;
         entry.wifiOnly = local?.wifiOnly ?? false;
         entry.deviceOwned = local?.deviceOwned ?? false;
@@ -1556,6 +1658,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
             local?.nativeBackendTransferOwned ?? false;
         entry.backendStage = local?.backendStage;
         entry.backendEngine = local?.backendEngine;
+        entry.backendAssetId = local?.backendAssetId;
         return entry;
       }).toList();
       final remoteItemIds = remoteItems.map((value) => value.id).toSet();
@@ -1607,10 +1710,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
         downloads,
         remoteDownloads,
         (value) => value.id,
-        (value) =>
-            value.dirty ||
-            value.deleted ||
-            _downloadAttempts.containsKey(value.id),
+        (value) => keepLocalDownloadDuringSync(
+          value,
+          hasActiveAttempt: _downloadAttempts.containsKey(value.id),
+        ),
       );
       _normalizeDetachedDownloads();
       _normalizeLegacyMediaSources();
@@ -2865,6 +2968,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final fileName = job.fileName;
     final kind = job.kind;
     if (fileUrl == null || fileName == null || kind == null) {
+      _downloadAttempts.remove(entry.id);
       entry
         ..state = 'failed'
         ..error = '서버가 완료 파일의 주소·이름·형식을 모두 반환하지 않았습니다.'
@@ -2980,8 +3084,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
     final resolvedCandidate = checked.candidate!;
     final downloadUri = resolvedCandidate.url;
-    entry.state = 'queued';
-    entry.progress = entry.mode == 'proxy' ? 85 : 0;
+    final startingState = entry.mode == 'proxy' ? 'running' : 'queued';
+    entry.state = startingState;
+    if (entry.mode == 'proxy' && entry.progress < 85) entry.progress = 85;
+    if (entry.mode != 'proxy') entry.progress = 0;
     entry.nativeId = null;
     entry.nativeBackendTransferOwned = false;
     entry.localPath = null;
@@ -2992,8 +3098,17 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     entry.mimeType = resolvedCandidate.mimeType;
     entry.backendStage = entry.mode == 'proxy' ? 'device_download' : null;
     entry.error = null;
+    entry.updatedAt = DateTime.now().toUtc();
+    entry.dirty = true;
+    await _changed(syncTodayNotification: false);
+    if (user?.id != userId ||
+        !_isCurrentDownloadAttempt(entry, currentAttempt) ||
+        entry.state != startingState) {
+      return;
+    }
     try {
       final job = await _platform.enqueueDownload(
+        taskId: entry.id,
         url: downloadUri,
         fileName: downloadFileName(
           entry.id,
@@ -3018,7 +3133,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       );
       if (user?.id != userId ||
           !_isCurrentDownloadAttempt(entry, currentAttempt) ||
-          entry.state != 'queued') {
+          entry.state != startingState) {
         if (job != null) {
           try {
             await _platform.cancelDownload(job.id);
@@ -3029,7 +3144,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       if (job == null) throw PlatformException(code: 'enqueue_failed');
       entry.nativeId = job.id;
       entry.saveLocation = job.saveLocation;
-      entry.state = 'queued';
+      entry.state = startingState;
       _downloadAttempts.remove(entry.id);
     } on PlatformException catch (error) {
       _downloadAttempts.remove(entry.id);
@@ -3231,10 +3346,8 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
               final nativeStatus = native['status'] as String? ?? 'waiting';
               final nativeProgress =
                   (native['progress'] as num?)?.toInt().clamp(0, 100) ?? 0;
-              entry
-                ..backendStage =
-                    native['stage'] as String? ?? entry.backendStage
-                ..error = native['error'] as String?;
+              entry.backendStage =
+                  native['stage'] as String? ?? entry.backendStage;
               if (nativeId != null) {
                 entry
                   ..nativeId = nativeId
@@ -3242,19 +3355,25 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
                       native['saveLocation'] as String? ?? entry.saveLocation
                   ..nativeBackendTransferOwned = false
                   ..backendStage = 'device_download'
-                  ..state = 'queued'
-                  ..progress = 85;
+                  ..state = entry.state == 'queued' ? 'running' : entry.state
+                  ..progress = entry.progress < 85 ? 85 : entry.progress
+                  ..error = null;
                 _downloadAttempts.remove(entry.id);
                 pendingNative.add((id: entry.id, nativeId: nativeId));
               } else {
+                final nextState = mergeBackendDownloadState(
+                  entry.state,
+                  nativeStatus,
+                );
+                final nextProgress = (nativeProgress * 85 ~/ 100).clamp(0, 84);
                 entry
-                  ..state = switch (nativeStatus) {
-                    'failed' => 'failed',
-                    'canceled' => 'canceled',
-                    'scheduled' || 'waiting' || 'queued' => 'queued',
-                    _ => 'running',
-                  }
-                  ..progress = (nativeProgress * 85 ~/ 100).clamp(0, 84);
+                  ..state = nextState
+                  ..progress = nextProgress > entry.progress
+                      ? nextProgress
+                      : entry.progress
+                  ..error = const {'failed', 'canceled'}.contains(nextState)
+                      ? native['error'] as String?
+                      : null;
                 if ({'failed', 'canceled'}.contains(entry.state)) {
                   entry.nativeBackendTransferOwned = false;
                   _downloadAttempts.remove(entry.id);
@@ -3279,23 +3398,31 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
               await _startReadyBackendFile(entry, job);
               continue;
             }
+            final nextState = mergeBackendDownloadState(
+              entry.state,
+              job.status,
+            );
+            final nextProgress = (job.progress * 85 ~/ 100).clamp(0, 84);
             entry
-              ..state = switch (job.status) {
-                'failed' => 'failed',
-                'canceled' => 'canceled',
-                'queued' => 'queued',
-                _ => 'running',
-              }
-              ..progress = (job.progress * 85 ~/ 100).clamp(0, 84)
+              ..state = nextState
+              ..progress = nextProgress > entry.progress
+                  ? nextProgress
+                  : entry.progress
               ..error = job.error == null
                   ? null
                   : backendFailureMessage(job.error!);
+            if (const {'failed', 'canceled'}.contains(entry.state)) {
+              _downloadAttempts.remove(entry.id);
+            }
           }
         } on PlatformException {
           // Native ownership remains authoritative after a transient channel error.
         } on DownloadBackendException catch (error) {
-          if (!error.retryable) entry.state = 'failed';
-          entry.error = backendFailureMessage(error);
+          if (!error.retryable) {
+            entry.state = 'failed';
+            entry.error = backendFailureMessage(error);
+            _downloadAttempts.remove(entry.id);
+          }
         } on TimeoutException {
           // The server job keeps running; a later poll can recover its state.
         } on SocketException {
@@ -3311,6 +3438,12 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
           nativeBackendTransferOwned: entry.nativeBackendTransferOwned,
         );
         if (current != previous) {
+          _logDownloadTransition(
+            entry,
+            event: 'backend_poll',
+            previousState: previous.state,
+            previousProgress: previous.progress,
+          );
           entry.updatedAt = DateTime.now().toUtc();
           if (current.state != previous.state ||
               {'failed', 'canceled'}.contains(current.state)) {
@@ -3322,6 +3455,10 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
       }
       for (final pendingEntry in pendingNative) {
         try {
+          int? nativeStatus;
+          int? nativeReason;
+          int? nativeDownloaded;
+          int? nativeTotal;
           final raw = await _platform.queryDownload(pendingEntry.nativeId);
           if (user?.id != userId) return;
           final entry = downloads
@@ -3349,55 +3486,31 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
             final reason = (raw['reason'] as num?)?.toInt() ?? 0;
             final downloaded = (raw['bytesDownloaded'] as num?)?.toInt() ?? 0;
             final total = (raw['totalBytes'] as num?)?.toInt() ?? -1;
-            final modifiedMillis =
-                (raw['lastModifiedMillis'] as num?)?.toInt() ?? 0;
-            final lastModified = modifiedMillis > 0
-                ? DateTime.fromMillisecondsSinceEpoch(
-                    modifiedMillis,
-                    isUtc: true,
-                  )
-                : entry.updatedAt;
-            if (status != null &&
-                isDownloadStartStalled(
-                  status: status,
-                  bytesDownloaded: downloaded,
-                  lastModified: lastModified,
-                  wifiOnly: entry.wifiOnly,
-                )) {
-              try {
-                await _platform.cancelDownload(pendingEntry.nativeId);
-              } catch (_) {}
-              if (user?.id != userId ||
-                  entry.nativeId != pendingEntry.nativeId) {
-                continue;
-              }
-              entry.state = 'failed';
-              entry.nativeId = null;
-              entry.error =
-                  '시스템 다운로드가 2분 동안 시작되지 않아 중단했습니다. 네트워크를 확인한 뒤 재시도해 주세요.';
-            } else {
-              if (total > 0) {
-                entry.sizeBytes = total;
-                final deviceProgress = (downloaded * 100 ~/ total).clamp(
-                  0,
-                  100,
-                );
-                entry.progress = entry.mode == 'proxy'
-                    ? 85 + deviceProgress * 15 ~/ 100
-                    : deviceProgress;
-              }
-              entry.state = switch (status) {
-                1 => 'queued',
-                2 => 'running',
-                4 => 'paused',
-                8 => 'completed',
-                16 => 'failed',
-                _ => entry.state,
-              };
-              if (entry.state == 'completed') entry.progress = 100;
-              entry.localPath = raw['localUri'] as String? ?? entry.localPath;
-              entry.saveLocation =
-                  raw['saveLocation'] as String? ?? entry.saveLocation;
+            nativeStatus = status;
+            nativeReason = reason;
+            nativeDownloaded = downloaded;
+            nativeTotal = total;
+            final expected =
+                (raw['expectedContentLength'] as num?)?.toInt() ?? -1;
+            final knownTotal = total > 0 ? total : expected;
+            if (knownTotal > 0) entry.sizeBytes = knownTotal;
+            if (status == 8 && knownTotal <= 0 && downloaded > 0) {
+              entry.sizeBytes = downloaded;
+            }
+            if (status != null) {
+              entry.progress = mergeNativeDownloadProgress(
+                currentProgress: entry.progress,
+                mode: entry.mode,
+                nativeStatus: status,
+                bytesDownloaded: downloaded,
+                totalBytes: knownTotal,
+              );
+            }
+            entry.state = mergeNativeDownloadState(entry.state, status);
+            entry.localPath = raw['localUri'] as String? ?? entry.localPath;
+            entry.saveLocation =
+                raw['saveLocation'] as String? ?? entry.saveLocation;
+            if (entry.state == 'failed') {
               final nativeError = (raw['errorMessage'] as String?)?.trim();
               final detail = downloadReasonMessage(
                 status ?? 0,
@@ -3407,8 +3520,18 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
               entry.error = nativeError?.isNotEmpty == true
                   ? nativeError
                   : detail.isEmpty
-                  ? null
+                  ? '시스템 다운로드가 실패했습니다.'
                   : detail;
+              try {
+                await _platform.cancelDownload(pendingEntry.nativeId);
+              } catch (_) {}
+              if (user?.id != userId ||
+                  entry.nativeId != pendingEntry.nativeId) {
+                continue;
+              }
+              entry.nativeId = null;
+            } else {
+              entry.error = null;
               if (entry.state == 'completed' && previous.state != 'completed') {
                 final attachment = await _attachCompletedDownload(entry);
                 if (attachment.error != null) entry.error = attachment.error;
@@ -3419,6 +3542,21 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
                 }
               }
             }
+            if (const {
+              'completed',
+              'failed',
+              'canceled',
+            }.contains(entry.state)) {
+              _downloadAttempts.remove(entry.id);
+            }
+          }
+          final failedBackendJobId = entry.state == 'failed'
+              ? entry.backendJobId
+              : null;
+          if (failedBackendJobId != null) {
+            try {
+              await _platform.cancelBackendTransfer(failedBackendJobId);
+            } catch (_) {}
           }
           final current = (
             state: entry.state,
@@ -3429,6 +3567,16 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
             nativeId: entry.nativeId,
           );
           if (current != previous) {
+            _logDownloadTransition(
+              entry,
+              event: 'device_poll',
+              previousState: previous.state,
+              previousProgress: previous.progress,
+              nativeStatus: nativeStatus,
+              reason: nativeReason,
+              bytesDownloaded: nativeDownloaded,
+              totalBytes: nativeTotal,
+            );
             entry.updatedAt = DateTime.now().toUtc();
             final stateChanged = current.state != previous.state;
             final terminal = {
@@ -3478,13 +3626,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     final nativeBackendTransferOwned = current.nativeBackendTransferOwned;
     var backendCancelFailed = false;
     if (backendJobId != null) {
-      if (nativeBackendTransferOwned) {
-        try {
-          if (!await _platform.cancelBackendTransfer(backendJobId)) {
-            showMessage('백그라운드 다운로드를 취소하지 못했습니다. 잠시 후 다시 시도해 주세요.');
-            return;
-          }
-        } catch (_) {
+      try {
+        final canceled = await _platform.cancelBackendTransfer(backendJobId);
+        if (nativeBackendTransferOwned && !canceled) {
+          showMessage('백그라운드 다운로드를 취소하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+          return;
+        }
+      } catch (_) {
+        if (nativeBackendTransferOwned) {
           showMessage('백그라운드 다운로드를 취소하지 못했습니다. 잠시 후 다시 시도해 주세요.');
           return;
         }
@@ -3578,13 +3727,14 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     }
     final backendJobId = current.backendJobId;
     if (backendJobId != null) {
-      if (current.nativeBackendTransferOwned) {
-        try {
-          if (!await _platform.cancelBackendTransfer(backendJobId)) {
-            showMessage('백그라운드 다운로드를 일시 중지하지 못했습니다.');
-            return;
-          }
-        } catch (_) {
+      try {
+        final canceled = await _platform.cancelBackendTransfer(backendJobId);
+        if (current.nativeBackendTransferOwned && !canceled) {
+          showMessage('백그라운드 다운로드를 일시 중지하지 못했습니다.');
+          return;
+        }
+      } catch (_) {
+        if (current.nativeBackendTransferOwned) {
           showMessage('백그라운드 다운로드를 일시 중지하지 못했습니다.');
           return;
         }
